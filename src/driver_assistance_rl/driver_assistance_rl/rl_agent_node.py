@@ -5,7 +5,7 @@ from rclpy.node import Node
 from std_msgs.msg import Float32MultiArray
 from geometry_msgs.msg import Twist
 import numpy as np
-
+import time
 from driver_assistance_rl.ppo_agent import PPOAgent
 
 class RLAgentNode(Node):
@@ -63,6 +63,11 @@ class RLAgentNode(Node):
         self.last_action = None
         self.last_logprob = None
         
+        # System synchronization
+        self.system_ready = False
+        self.startup_delay = 5.5  # seconds to wait (0.5 second after sim_node)
+        self.startup_time = time.time()
+        
         self.get_logger().info(f"RLAgentNode initialized in {mode} mode")
         
     def state_callback(self, msg):
@@ -70,6 +75,15 @@ class RLAgentNode(Node):
         Receive state and compute action.
         State format: [b1, b2, b3, b4, beam_dist, left_lane, right_lane, lane_offset, heading_error]
         """
+        # Check if system is ready before processing
+        if not self.system_ready:
+            elapsed = time.time() - self.startup_time
+            if elapsed < self.startup_delay:
+                return  # Silently wait
+            else:
+                self.system_ready = True
+                self.get_logger().info("RL Agent ready!")
+        
         state = np.array(msg.data, dtype=np.float32)
         
         # Compute action using PPO agent

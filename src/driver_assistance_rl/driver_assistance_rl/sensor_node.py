@@ -23,6 +23,11 @@ class SensorNode(Node):
             Float32MultiArray, '/sim/step', self.state_callback, 10
         )
         
+        # System synchronization
+        self.system_ready = False
+        self.startup_delay = 5.2  # seconds
+        self.startup_time = time.time()
+        
         self.get_logger().info("SensorNode initialized")
         
     def state_callback(self, msg):
@@ -33,6 +38,15 @@ class SensorNode(Node):
         - Noise injection
         - State filtering
         """
+        # Check if system is ready
+        if not self.system_ready:
+            elapsed = time.time() - self.startup_time
+            if elapsed < self.startup_delay:
+                return  # Silently wait
+            else:
+                self.system_ready = True
+                self.get_logger().info("Sensor node ready!")
+        
         # State directly from simulation: [b1, b2, b3, b4, beam_dist, left_lane, right_lane, lane_offset, heading_error]
         state = np.array(msg.data, dtype=np.float32)
         

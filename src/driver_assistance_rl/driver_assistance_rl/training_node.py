@@ -86,17 +86,31 @@ class TrainingNode(Node):
         self.step_count = 0
         self.done = False  # Track episode termination
         
+        # System synchronization
+        self.system_ready = False
+        self.startup_delay = 6  # seconds to wait (1 second after sim_node)
+        self.startup_time = time.time()
+        self.first_state_received = False
+        self.first_action_received = False
+        
+        # Post-episode synchronization
+        self.awaiting_post_episode_sync = False
+        self.post_episode_sync_time = None
+        self.post_episode_sync_delay = 2  # seconds to wait between episodes
+        
         self.get_logger().info("TrainingNode initialized")
         
     def state_callback(self, msg):
         """Receive state from sensor"""
         self.current_state = np.array(msg.data, dtype=np.float32)
+        self.first_state_received = True
         self.training_step_callback()
         
     def action_callback(self, msg):
         """Receive action from agent"""
         self.current_action = int(msg.data[0])
         self.current_logprob = float(msg.data[1])
+        self.first_action_received = True
         
     def done_callback(self, msg):
         """Receive collision/lane exit status from simulation"""
@@ -167,6 +181,40 @@ class TrainingNode(Node):
         
     def training_step_callback(self):
         """Main training loop step"""
+        # Handle post-episode synchronization
+        if self.awaiting_post_episode_sync:
+            elapsed = time.time() - self.post_episode_sync_time
+            if elapsed < self.post_episode_sync_delay:
+                self.get_logger().info(
+                    f"Post-episode sync: {elapsed:.1f}/{self.post_episode_sync_delay}s"
+                )
+                return
+            else:
+                self.awaiting_post_episode_sync = False
+                self.training_active = True
+                self.get_logger().info(f"✓ Episode {self.current_episode} - System re-synchronized!")
+                return
+        
+        # Check if system is ready (initial startup)
+        if not self.system_ready:
+            elapsed = time.time() - self.startup_time
+            if elapsed < self.startup_delay:
+                self.get_logger().info(
+                    f"System startup: {elapsed:.1f}/{self.startup_delay}s | "
+                    f"State: {self.first_state_received} | Action: {self.first_action_received}"
+                )
+                return
+            elif not self.first_state_received or not self.first_action_received:
+                self.get_logger().warn(
+                    f"Waiting for all nodes... State: {self.first_state_received}, Action: {self.first_action_received}"
+                )
+                return
+            else:
+                self.system_ready = True
+                self.training_active = True
+                self.get_logger().info("System synchronized! Starting training")
+                self.current_episode = 1
+        
         if not self.training_active or self.current_state is None:
             return
         
@@ -178,7 +226,7 @@ class TrainingNode(Node):
             # Use actual done flag from simulation
             reward = self.compute_reward(self.current_state, self.current_action, self.done)
             self.episode_reward += reward
-            # print(f"Step {self.step_count}, Reward: {reward:.2f}, Action: {self.current_action}, Total: {self.episode_reward:.2f}")
+            print(f"Step {self.step_count}, Reward: {reward:.2f}, Action: {self.current_action}, Total: {self.episode_reward:.2f}")
             
             # Store in agent memory (in actual implementation,
             # this would call agent.remember through service or action)
@@ -217,10 +265,16 @@ class TrainingNode(Node):
         reset_msg = Float32MultiArray()
         reset_msg.data = [1.0]  # Simple flag to trigger reset
         self.reset_pub.publish(reset_msg)
-        self.get_logger().info(f"Episode {self.current_episode} - Reset signal sent to sim_node")
+        self.get_logger().info(f"Episode {self.current_episode - 1} - Reset signal sent to sim_node")
+        
+        # Start post-episode synchronization
+        self.training_active = False  # Pause training
+        self.awaiting_post_episode_sync = True
+        self.post_episode_sync_time = time.time()
+        self.get_logger().info(f"Episode {self.current_episode - 1} → {self.current_episode}: Starting post-episode sync...")
         
         # Check if training is complete
-        if self.current_episode >= self.EPISODES:
+        if self.current_episode > self.EPISODES:
             self.stop_training()
     
     def start_training(self):
@@ -250,8 +304,7 @@ def main():
     rclpy.init()
     node = TrainingNode()
     
-    # Start training
-    node.start_training()
+    # Don't manually start training - it will auto-start after synchronization
     
     try:
         rclpy.spin(node)

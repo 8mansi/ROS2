@@ -66,12 +66,18 @@ class SimNode(Node):
         # Simulation step timer
         self.timer = self.create_timer(self.timeStep, self.simulation_step)
         
+        # System readiness
+        self.system_ready = False
+        self.startup_delay = 5  # seconds to wait for ROS2 discovery
+        self.startup_time = time.time()
+        
         self.get_logger().info("SimNode initialized")
         
     def reset_simulation(self):
         """Reset the entire simulation"""
         p.resetSimulation()
         p.setGravity(0, 0, -9.8)
+        p.setRealTimeSimulation(0)
         p.setTimeStep(self.timeStep)
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
         
@@ -232,8 +238,7 @@ class SimNode(Node):
             
     def get_state(self):
         """Get comprehensive state from simulation"""
-        try:
-            robot_pos, robot_orn = p.getBasePositionAndOrientation(self.robot_id)
+        robot_pos, robot_orn = p.getBasePositionAndOrientation(self.robot_id)
         
         # Get beam sensor readings
         b1, b2, b3, b4 = self.four_parallel_robot_beams(robot_pos)
@@ -272,18 +277,14 @@ class SimNode(Node):
         yaw = p.getEulerFromQuaternion(robot_orn)[2]
         heading_error = np.clip(yaw / np.pi, -1.0, 1.0)
         
-            return np.array([
-                b1, b2, b3, b4,
-                beam_dist,
-                left_lane, right_lane,
-                lane_offset,
-                heading_error
-            ], dtype=np.float32)
-        except Exception as e:
-            self.get_logger().error(f"Error getting state: {e}")
-            # Return safe default state
-            return np.array([0.5, 0.5, 0.5, 0.5, 0.5, 0, 0, 0, 0], dtype=np.float32)
-        
+        return np.array([
+            b1, b2, b3, b4,
+            beam_dist,
+            left_lane, right_lane,
+            lane_offset,
+            heading_error
+        ], dtype=np.float32)
+    
     def four_parallel_robot_beams(self, robot_pos, max_range=None, rays_per_beam=5, beam_width=0.2):
         """Emit parallel rays for obstacle detection"""
         if max_range is None:
@@ -526,6 +527,16 @@ class SimNode(Node):
         
     def simulation_step(self):
         """Main simulation step"""
+        # Check if startup delay has passed
+        if not self.system_ready:
+            elapsed = time.time() - self.startup_time
+            if elapsed < self.startup_delay:
+                self.get_logger().info(f"Waiting for system startup... {elapsed:.1f}/{self.startup_delay}s")
+                return
+            else:
+                self.system_ready = True
+                self.get_logger().info("System ready! Starting simulation")
+        
         try:
             p.stepSimulation()
             self.move_cars()
