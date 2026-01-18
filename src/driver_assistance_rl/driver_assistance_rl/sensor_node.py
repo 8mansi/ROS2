@@ -1,59 +1,49 @@
+#!/usr/bin/env python3
+
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float32MultiArray
-import pybullet as p
 import numpy as np
 import time
 
+
 class SensorNode(Node):
+    """
+    Sensor node that receives state from simulation and publishes it for the RL agent.
+    """
+    
     def __init__(self):
         super().__init__('sensor_node')
+        
+        # Publisher for state
         self.pub = self.create_publisher(Float32MultiArray, '/rl/state', 10)
         
-        # 1. CONNECT TO SIMULATION
-        # We use SHARED_MEMORY to talk to the sim_node process
-        self.client = p.connect(p.SHARED_MEMORY)
+        # Subscriber to simulation step events
+        self.sub = self.create_subscription(
+            Float32MultiArray, '/sim/step', self.state_callback, 10
+        )
         
-        if self.client < 0:
-            self.get_logger().error("Failed to connect to PyBullet. Ensure sim_node is running!")
-        else:
-            self.get_logger().info("Connected to PyBullet simulation via Shared Memory.")
+        self.get_logger().info("SensorNode initialized")
+        
+    def state_callback(self, msg):
+        """
+        Receive state from simulation and republish for RL agent.
+        This node acts as a passthrough that could be extended for:
+        - Additional sensor processing
+        - Noise injection
+        - State filtering
+        """
+        # State directly from simulation: [b1, b2, b3, b4, beam_dist, left_lane, right_lane, lane_offset, heading_error]
+        state = np.array(msg.data, dtype=np.float32)
+        
+        # Publish state for RL agent
+        out_msg = Float32MultiArray()
+        out_msg.data = state.tolist()
+        self.pub.publish(out_msg)
+        
+        # Optional logging
+        # self.get_logger().debug(f"State: {state}")
 
-        # 2. RUN AT 10Hz
-        self.timer = self.create_timer(0.1, self.publish_state)
-
-    def publish_state(self):
-        # 3. SAFETY CHECK: Is the simulation ready?
-        if self.client < 0 or p.getNumBodies(physicsClientId=self.client) == 0:
-            self.get_logger().warn("Simulation not ready or no objects found...", once=True)
-            return
-
-        try:
-            # 4. GET POSITION AND ORIENTATION
-            # Body ID 0 is usually the plane, 1 is usually your car.
-            # Change '1' to '0' if your car is the only object loaded.
-            car_id = 1 
-            pos, orn = p.getBasePositionAndOrientation(car_id, physicsClientId=self.client)
-            
-            # Convert orientation to Euler to get Yaw
-            euler = p.getEulerFromQuaternion(orn)
-            yaw = euler[2]
-
-            # 5. PREPARE MSG
-            state = np.array([
-                pos[0], # X position
-                pos[1], # Y position
-                yaw     # Rotation (Yaw)
-            ], dtype=np.float32)
-
-            msg = Float32MultiArray()
-            msg.data = state.tolist()
-            self.pub.publish(msg)
-
-        except Exception as e:
-            # If the car ID doesn't exist yet, it will throw an error. 
-            # We catch it so the node doesn't die.
-            self.get_logger().debug(f"Waiting for car: {e}")
 
 def main():
     rclpy.init()
@@ -63,9 +53,9 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        p.disconnect(physicsClientId=node.client)
         node.destroy_node()
         rclpy.shutdown()
+
 
 if __name__ == "__main__":
     main()

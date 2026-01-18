@@ -8,6 +8,7 @@ import numpy as np
 class PPOActorCritic(nn.Module):
     def __init__(self, state_dim=9, action_dim=4): 
         super().__init__()
+        print("Initializing PPOActorCritic Network")
         self.shared = nn.Sequential(
             nn.Linear(state_dim, 128), nn.ReLU(),
             nn.Linear(128, 128), nn.ReLU(),
@@ -61,6 +62,7 @@ class PPOAgent:
         min_batch_size=256,
         entropy_coef=0.03
     ):
+        print("Initializing PPOAgent")
         self.model = PPOActorCritic(state_dim=state_dim, action_dim=action_dim)
         self.optimizer = optim.Adam([
             {"params": self.model.policy.parameters(), "lr": actor_lr},
@@ -108,6 +110,7 @@ class PPOAgent:
         return int(action.item()), float(logprob.item())
 
     def remember(self, s, a, lp, r, d):
+        print("PPOAgent remembering transition")
         if self.last_action is not None and a == 3 and self.last_action == 3:
             r -= 0.02
         self.memory["states"].append(np.array(s, dtype=np.float32))
