@@ -110,7 +110,6 @@ class PPOAgent:
         return int(action.item()), float(logprob.item())
 
     def remember(self, s, a, lp, r, d):
-        print("PPOAgent remembering transition")
         if self.last_action is not None and a == 3 and self.last_action == 3:
             r -= 0.02
         self.memory["states"].append(np.array(s, dtype=np.float32))

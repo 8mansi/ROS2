@@ -7,10 +7,8 @@
     Adapted from DriverAssistanceSim.py to run as a distributed ROS2 system.
     Uses PPO agent for autonomous driving in simulated traffic environments.
   </description>
-
-  <maintainer email="team@example.com">Driver Assistance Team</maintainer>
-  <license>Apache-2.0</license>
-
+  <maintainer email="driver@assistant.com">Driver Assistance</maintainer>
+  <license>1.0</license>
   <!-- Build system -->
   <buildtool_depend>ament_python</buildtool_depend>
 

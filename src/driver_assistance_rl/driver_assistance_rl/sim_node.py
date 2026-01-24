@@ -35,7 +35,7 @@ class SimNode(Node):
         self.WHEEL_DISTANCE = 0.55
         
         # PyBullet setup
-        self.physicsClient = p.connect(p.GUI)
+        self.physicsClient = p.connect(p.DIRECT)
         p.setGravity(0, 0, -9.8)
         p.setTimeStep(self.timeStep)
         p.setRealTimeSimulation(0)
@@ -460,7 +460,7 @@ class SimNode(Node):
     def check_lane_crossing(self, robot_id, threshold=20, forward_offset=0.3, z_offset=0.05):
         """Check if robot has crossed lane markings"""
         rgb, _, _ = self.get_lane_camera_image(robot_id)
-        print("Mean pixel value:", np.mean(rgb))  # Debugging line
+        # print("Mean pixel value:", np.mean(rgb))
         lane_visible = (np.mean(rgb) > threshold)
         
         pos, _ = p.getBasePositionAndOrientation(robot_id)

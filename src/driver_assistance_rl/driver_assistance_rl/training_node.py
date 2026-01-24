@@ -72,6 +72,16 @@ class TrainingNode(Node):
             Float32MultiArray, '/sim/done', self.done_callback, 10
         )
         
+        # Publisher to trigger training on RL agent
+        self.train_trigger_pub = self.create_publisher(
+            Float32MultiArray, '/training/do_training', 10
+        )
+        
+        # Publisher for transition data to RL agent
+        self.transition_pub = self.create_publisher(
+            Float32MultiArray, '/training/transition', 10
+        )
+        
         # Command publisher
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         
@@ -225,10 +235,16 @@ class TrainingNode(Node):
             # Use actual done flag from simulation
             reward = self.compute_reward(self.current_state, self.current_action, self.done)
             self.episode_reward += reward
-            print(f"Episode {self.current_episode}, Step {self.step_count}, Reward: {reward:.2f}, Action: {self.current_action}, Total: {self.episode_reward:.2f}")
+            # print(f"Episode {self.current_episode}, Step {self.step_count}, Reward: {reward:.2f}, Action: {self.current_action}, Total: {self.episode_reward:.2f}")
             
-            # Store in agent memory (in actual implementation,
-            # this would call agent.remember through service or action)
+            # Publish transition data for RL agent to store in memory
+            trans_msg = Float32MultiArray()
+            trans_msg.data = [
+                reward,
+                float(self.done),
+                float(self.current_action)
+            ]
+            self.transition_pub.publish(trans_msg)
             
         if self.step_count >= self.STEPS_PER_EPISODE or self.done:
             self.end_episode()
@@ -274,10 +290,16 @@ class TrainingNode(Node):
         self.reset_pub.publish(reset_msg)
         self.get_logger().info(f"Reset signal sent to all nodes")
         
+        # Trigger training update on RL agent (force training at end of episode)
+        train_msg = Float32MultiArray()
+        train_msg.data = [1.0]  # force=True
+        self.train_trigger_pub.publish(train_msg)
+        self.get_logger().info(f"Training trigger sent to RL agent")
+        
         # Check if training is complete
         if self.current_episode > self.EPISODES:
-            self.stop_training()
-
+            self.get_logger().info("Training complete!")
+            rclpy.shutdown()
 
 def main():
     rclpy.init()

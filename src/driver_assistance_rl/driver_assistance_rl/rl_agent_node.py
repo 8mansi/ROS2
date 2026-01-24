@@ -82,11 +82,27 @@ class RLAgentNode(Node):
             10
         )
         
+        # Subscriber to transition data from training node
+        self.transition_sub = self.create_subscription(
+            Float32MultiArray,
+            '/training/transition',
+            self.transition_callback,
+            10
+        )
+        
+        # Subscriber to training trigger
+        self.train_trigger_sub = self.create_subscription(
+            Float32MultiArray,
+            '/training/do_training',
+            self.train_trigger_callback,
+            10
+        )
+        
         self.get_logger().info(f"RLAgentNode initialized in {mode} mode")
         
     def reset_callback(self, msg):
         """Handle reset requests to reinitialize action publishing"""
-        self.get_logger().info("Reset signal received in rl_agent_node - keeping model intact")
+        # self.get_logger().info("Reset signal received in rl_agent_node - keeping model intact")
         self.first_episode = False
         self.awaiting_post_episode_reset = True
         self.post_episode_reset_time = time.time()
@@ -95,6 +111,42 @@ class RLAgentNode(Node):
         self.last_state = None
         self.last_action = None
         self.last_logprob = None
+        self.save_model(self.model_path)
+    
+    def transition_callback(self, msg):
+        """Receive reward and done flag, store transition in agent memory"""
+        if self.mode != 'training' or self.last_state is None:
+            return
+        
+        reward = float(msg.data[0])
+        done = bool(msg.data[1])
+        
+        # Store transition in agent memory
+        self.agent.remember(
+            self.last_state,
+            self.last_action,
+            self.last_logprob,
+            reward,
+            done
+        )
+        self.get_logger().debug(f"Transition stored: reward={reward:.2f}, done={done}")
+    
+    def train_trigger_callback(self, msg):
+        """Receive training trigger and perform gradient updates"""
+        if self.mode != 'training':
+            return
+        
+        force = bool(msg.data[0]) if len(msg.data) > 0 else False
+        
+        result = self.agent.train(force=force)
+        if result is not None:
+            loss, actor_loss, critic_loss, entropy = result
+            print("\n" + "="*60)
+            self.get_logger().info(
+                f"PPO Update - Loss: {loss:.4f}, Actor: {actor_loss:.4f}, "
+                f"Critic: {critic_loss:.4f}, Entropy: {entropy:.4f}"
+            )
+            print("\n" + "="*60)
         
     def state_callback(self, msg):
         """
