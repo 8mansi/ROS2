@@ -23,12 +23,31 @@ class SensorNode(Node):
             Float32MultiArray, '/sim/step', self.state_callback, 10
         )
         
+        # Subscriber to reset requests
+        self.reset_sub = self.create_subscription(
+            Float32MultiArray, '/sim/reset', self.reset_callback, 10
+        )
+        
         # System synchronization
         self.system_ready = False
         self.startup_delay = 5.2  # seconds
         self.startup_time = time.time()
+        self.first_episode = True
+        
+        # Post-episode reset synchronization
+        self.awaiting_post_episode_reset = False
+        self.post_episode_reset_time = None
+        self.post_episode_reset_delay = 2.0  # seconds to wait after reset request
         
         self.get_logger().info("SensorNode initialized")
+    
+    def reset_callback(self, msg):
+        """Handle reset requests to reinitialize state publishing"""
+        self.get_logger().info("Reset signal received in sensor_node")
+        self.first_episode = False
+        self.awaiting_post_episode_reset = True
+        self.post_episode_reset_time = time.time()
+        self.system_ready = False  # Pause publishing until sync complete
         
     def state_callback(self, msg):
         """
@@ -38,6 +57,17 @@ class SensorNode(Node):
         - Noise injection
         - State filtering
         """
+        # Handle post-episode reset synchronization
+        if self.awaiting_post_episode_reset:
+            elapsed = time.time() - self.post_episode_reset_time
+            if elapsed < self.post_episode_reset_delay:
+                return  # Silently wait
+            else:
+                self.awaiting_post_episode_reset = False
+                self.system_ready = True
+                self.get_logger().info("Sensor node re-synchronized after episode reset!")
+                return  # Skip this message
+        
         # Check if system is ready
         if not self.system_ready:
             elapsed = time.time() - self.startup_time
@@ -54,9 +84,6 @@ class SensorNode(Node):
         out_msg = Float32MultiArray()
         out_msg.data = state.tolist()
         self.pub.publish(out_msg)
-        
-        # Optional logging
-        # self.get_logger().debug(f"State: {state}")
 
 
 def main():

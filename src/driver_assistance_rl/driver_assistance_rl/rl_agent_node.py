@@ -67,14 +67,51 @@ class RLAgentNode(Node):
         self.system_ready = False
         self.startup_delay = 5.5  # seconds to wait (0.5 second after sim_node)
         self.startup_time = time.time()
+        self.first_episode = True
+        
+        # Post-episode reset synchronization
+        self.awaiting_post_episode_reset = False
+        self.post_episode_reset_time = None
+        self.post_episode_reset_delay = 1.5  # seconds to wait after reset request
+        
+        # Subscriber to reset requests
+        self.reset_sub = self.create_subscription(
+            Float32MultiArray,
+            '/sim/reset',
+            self.reset_callback,
+            10
+        )
         
         self.get_logger().info(f"RLAgentNode initialized in {mode} mode")
+        
+    def reset_callback(self, msg):
+        """Handle reset requests to reinitialize action publishing"""
+        self.get_logger().info("Reset signal received in rl_agent_node - keeping model intact")
+        self.first_episode = False
+        self.awaiting_post_episode_reset = True
+        self.post_episode_reset_time = time.time()
+        self.system_ready = False  # Pause action publishing until sync complete
+        # Reset the last stored action/state
+        self.last_state = None
+        self.last_action = None
+        self.last_logprob = None
         
     def state_callback(self, msg):
         """
         Receive state and compute action.
         State format: [b1, b2, b3, b4, beam_dist, left_lane, right_lane, lane_offset, heading_error]
         """
+        # Handle post-episode reset synchronization
+        if self.awaiting_post_episode_reset:
+            elapsed = time.time() - self.post_episode_reset_time
+            if elapsed < self.post_episode_reset_delay:
+                return  # Silently wait
+            else:
+                self.awaiting_post_episode_reset = False
+                self.system_ready = True
+                self.get_logger().info("RL Agent re-synchronized after episode reset!")
+                return  # Skip this message
+        
         # Check if system is ready before processing
         if not self.system_ready:
             elapsed = time.time() - self.startup_time

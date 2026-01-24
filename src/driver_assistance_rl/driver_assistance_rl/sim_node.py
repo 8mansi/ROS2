@@ -70,6 +70,12 @@ class SimNode(Node):
         self.system_ready = False
         self.startup_delay = 5  # seconds to wait for ROS2 discovery
         self.startup_time = time.time()
+        self.first_episode = True
+        
+        # Post-episode reset synchronization
+        self.awaiting_post_episode_reset = False
+        self.post_episode_reset_time = None
+        self.post_episode_reset_delay = 2.5  # seconds to wait after reset request
         
         self.get_logger().info("SimNode initialized")
         
@@ -234,7 +240,12 @@ class SimNode(Node):
     def reset_callback(self, msg):
         """Handle reset requests from training node"""
         self.get_logger().info("Reset requested by training node")
+        # For subsequent episodes, just reset without startup delay
+        self.first_episode = False
         self.reset_simulation()
+        self.awaiting_post_episode_reset = True
+        self.post_episode_reset_time = time.time()
+        self.system_ready = False  # Pause publishing until sync complete
             
     def get_state(self):
         """Get comprehensive state from simulation"""
@@ -527,11 +538,22 @@ class SimNode(Node):
         
     def simulation_step(self):
         """Main simulation step"""
+        # Handle post-episode reset synchronization
+        if self.awaiting_post_episode_reset:
+            elapsed = time.time() - self.post_episode_reset_time
+            if elapsed < self.post_episode_reset_delay:
+                return  # Wait for sync delay
+            else:
+                self.awaiting_post_episode_reset = False
+                self.system_ready = True
+                self.get_logger().info("Sim node re-synchronized after episode reset!")
+                return  # Skip simulation step this iteration
+        
         # Check if startup delay has passed
         if not self.system_ready:
             elapsed = time.time() - self.startup_time
             if elapsed < self.startup_delay:
-                self.get_logger().info(f"Waiting for system startup... {elapsed:.1f}/{self.startup_delay}s")
+                # Waiting for system startup
                 return
             else:
                 self.system_ready = True
