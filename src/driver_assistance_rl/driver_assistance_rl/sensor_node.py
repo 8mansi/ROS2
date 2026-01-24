@@ -44,6 +44,11 @@ class SensorNode(Node):
     def reset_callback(self, msg):
         """Handle reset requests to reinitialize state publishing"""
         self.get_logger().info("Reset signal received in sensor_node")
+        if msg.data[0] == 0.0:
+            # Training finished, stop reacting
+            self.get_logger().info("Received stop signal. No further resets.")
+            return
+
         self.first_episode = False
         self.awaiting_post_episode_reset = True
         self.post_episode_reset_time = time.time()

@@ -18,9 +18,9 @@ class TrainingNode(Node):
     
     def __init__(self):
         super().__init__('training_node')
-        
+        self.training_complete = False 
         # Training hyperparameters
-        self.EPISODES = 500
+        self.EPISODES = 10
         self.STEPS_PER_EPISODE = 500
         self.timeStep = 0.1
         self.max_range = 3
@@ -235,7 +235,7 @@ class TrainingNode(Node):
             # Use actual done flag from simulation
             reward = self.compute_reward(self.current_state, self.current_action, self.done)
             self.episode_reward += reward
-            # print(f"Episode {self.current_episode}, Step {self.step_count}, Reward: {reward:.2f}, Action: {self.current_action}, Total: {self.episode_reward:.2f}")
+            print(f"Episode {self.current_episode}, Step {self.step_count}, Reward: {reward:.2f}, Action: {self.current_action}, Total: {self.episode_reward:.2f}")
             
             # Publish transition data for RL agent to store in memory
             trans_msg = Float32MultiArray()
@@ -250,8 +250,9 @@ class TrainingNode(Node):
             self.end_episode()
         
     def end_episode(self):
-        """End current episode and prepare for next"""
-        # IMMEDIATELY pause training and callbacks before anything else
+        """End current episode and prepare for next"""        
+       
+        
         self.training_active = False  # Pause training
         self.awaiting_post_episode_sync = True
         self.post_episode_sync_time = time.time()
@@ -283,6 +284,28 @@ class TrainingNode(Node):
         self.current_action = None  # Clear action
         self.first_state_received = False  # Reset state reception flag for new episode
         self.first_action_received = False  # Reset action reception flag for new episode
+
+         # Check if training is complete
+        if self.current_episode > self.EPISODES:
+            self.get_logger().info("Training complete!")
+            if hasattr(self, 'timer'):
+                self.timer.cancel() 
+            self.training_complete = True
+
+            stop_msg = Float32MultiArray()
+            stop_msg.data = [0.0]  # 0.0 means “do not reset anymore / stop”
+            self.reset_pub.publish(stop_msg)
+            
+            # Also stop forcing training
+            stop_train_msg = Float32MultiArray()
+            stop_train_msg.data = [0.0]  # 0.0 means “stop training updates”
+            self.train_trigger_pub.publish(stop_train_msg)
+            
+            self.training_active = False
+            self.awaiting_post_episode_sync = False
+
+           
+            return
         
         # Publish reset request to all nodes
         reset_msg = Float32MultiArray()
@@ -296,17 +319,15 @@ class TrainingNode(Node):
         self.train_trigger_pub.publish(train_msg)
         self.get_logger().info(f"Training trigger sent to RL agent")
         
-        # Check if training is complete
-        if self.current_episode > self.EPISODES:
-            self.get_logger().info("Training complete!")
-            rclpy.shutdown()
 
 def main():
     rclpy.init()
     node = TrainingNode()
         
     try:
-        rclpy.spin(node)
+        while rclpy.ok() and not node.training_complete:
+            rclpy.spin_once(node, timeout_sec=0.1)
+
     except KeyboardInterrupt:
         pass
     finally:

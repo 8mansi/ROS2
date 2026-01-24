@@ -103,6 +103,11 @@ class RLAgentNode(Node):
     def reset_callback(self, msg):
         """Handle reset requests to reinitialize action publishing"""
         # self.get_logger().info("Reset signal received in rl_agent_node - keeping model intact")
+        if msg.data[0] == 0.0:
+            # Training finished, stop reacting
+            self.get_logger().info("Received stop signal. No further resets.")
+            return
+
         self.first_episode = False
         self.awaiting_post_episode_reset = True
         self.post_episode_reset_time = time.time()
@@ -112,6 +117,7 @@ class RLAgentNode(Node):
         self.last_action = None
         self.last_logprob = None
         self.save_model(self.model_path)
+        
     
     def transition_callback(self, msg):
         """Receive reward and done flag, store transition in agent memory"""

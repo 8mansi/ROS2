@@ -21,6 +21,7 @@ class SimNode(Node):
         super().__init__('sim_node')
         
         # Simulation parameters
+        self.sim_running = True
         self.timeStep = 0.1
         self.num_steps = 500
         self.max_range = 3
@@ -33,9 +34,17 @@ class SimNode(Node):
         self.wheel_joints = [2, 3, 4, 5]
         self.MAX_FORCE = 200
         self.WHEEL_DISTANCE = 0.55
+
+        # --- MCL parameters ---
+        self.num_particles = 200
+        self.particles = None  # [x, y, yaw]
+        self.weights = None
+        self.motion_noise = np.array([0.02, 0.02, 0.01])
+        self.sensor_noise = 0.2
+
         
         # PyBullet setup
-        self.physicsClient = p.connect(p.DIRECT)
+        self.physicsClient = p.connect(p.GUI)
         p.setGravity(0, 0, -9.8)
         p.setTimeStep(self.timeStep)
         p.setRealTimeSimulation(0)
@@ -78,6 +87,18 @@ class SimNode(Node):
         self.post_episode_reset_delay = 2.5  # seconds to wait after reset request
         
         self.get_logger().info("SimNode initialized")
+    
+    def init_particles(self):
+        self.particles = np.zeros((self.num_particles, 3))
+        self.weights = np.ones(self.num_particles) / self.num_particles
+
+        x0, y0, _ = self.robot_start_pos
+        yaw0 = 0.0
+
+        self.particles[:, 0] = x0 + np.random.randn(self.num_particles) * 0.2
+        self.particles[:, 1] = y0 + np.random.randn(self.num_particles) * 0.2
+        self.particles[:, 2] = yaw0 + np.random.randn(self.num_particles) * 0.05
+
         
     def reset_simulation(self):
         """Reset the entire simulation"""
@@ -99,7 +120,8 @@ class SimNode(Node):
         # Spawn traffic cars
         self.cars = []
         self.spawn_cars(self.num_cars)
-        
+        self.init_particles()
+
         self.trajectory = []
         self.danger_points = []
         
@@ -107,6 +129,10 @@ class SimNode(Node):
         p.stepSimulation()
         
         self.get_logger().info("Simulation reset complete")
+    
+    def disconnect_environmnent(self):
+        p.disconnect()
+
         
     def initialize_road(self):
         """Create lanes and road markings"""
@@ -218,6 +244,15 @@ class SimNode(Node):
             pos, orn = p.getBasePositionAndOrientation(cid)
             new_pos = [pos[0] - car['vel'], pos[1], pos[2]]
             p.resetBasePositionAndOrientation(cid, new_pos, orn)
+    
+    def mcl_motion_update(self, v, w):
+        dt = self.timeStep
+        noise = np.random.randn(self.num_particles, 3) * self.motion_noise
+
+        self.particles[:, 0] += v * np.cos(self.particles[:, 2]) * dt + noise[:, 0]
+        self.particles[:, 1] += v * np.sin(self.particles[:, 2]) * dt + noise[:, 1]
+        self.particles[:, 2] += w * dt + noise[:, 2]
+
             
     def cmd_callback(self, msg):
         """Handle velocity commands"""
@@ -236,17 +271,70 @@ class SimNode(Node):
                 targetVelocity=vel,
                 force=self.MAX_FORCE
             )
-            
+        self.mcl_motion_update(linear, angular)
+
+    def shutdown_simulation(self):
+        self.get_logger().info("Stopping simulation cleanly")
+        self.sim_running = False
+
+        if hasattr(self, 'timer'):
+            self.timer.cancel()
+        try:
+            p.disconnect()
+        except:
+            pass
+
     def reset_callback(self, msg):
         """Handle reset requests from training node"""
         self.get_logger().info("Reset requested by training node")
+        if msg.data[0] == 0.0:
+            # Training finished, stop reacting
+            self.get_logger().info("Received stop signal. No further resets.")
+            self.shutdown_simulation()
+            return
+
         # For subsequent episodes, just reset without startup delay
         self.first_episode = False
         self.reset_simulation()
         self.awaiting_post_episode_reset = True
         self.post_episode_reset_time = time.time()
         self.system_ready = False  # Pause publishing until sync complete
-            
+    
+    def mcl_measurement_update(self, b1, b2, b3, b4):
+        z = np.array([b1, b2, b3, b4])
+
+        for i, ptl in enumerate(self.particles):
+            fake_pos = [ptl[0], ptl[1], self.z_offset]
+            d1, d2, d3, d4 = self.four_parallel_robot_beams(fake_pos, yaw_override=ptl[2])
+            z_hat = np.array([
+                self.norm_beam(d1),
+                self.norm_beam(d2),
+                self.norm_beam(d3),
+                self.norm_beam(d4),
+            ])
+            err = np.linalg.norm(z - z_hat)
+            self.weights[i] = np.exp(-0.5 * (err ** 2) / (self.sensor_noise ** 2))
+
+        self.weights += 1e-9
+        self.weights /= np.sum(self.weights)
+
+    def mcl_resample(self):
+        idx = np.random.choice(
+            self.num_particles,
+            size=self.num_particles,
+            p=self.weights
+        )
+        self.particles = self.particles[idx]
+        self.weights.fill(1.0 / self.num_particles)
+
+    def mcl_estimated_pose(self):
+        mean = np.average(self.particles, axis=0, weights=self.weights)
+        return mean  # x, y, yaw
+
+    def neff(self):
+        return 1.0 / np.sum(self.weights ** 2)
+
+
     def get_state(self):
         """Get comprehensive state from simulation"""
         robot_pos, robot_orn = p.getBasePositionAndOrientation(self.robot_id)
@@ -257,6 +345,10 @@ class SimNode(Node):
         b2 = self.norm_beam(b2)
         b3 = self.norm_beam(b3)
         b4 = self.norm_beam(b4)
+
+        self.mcl_measurement_update(b1, b2, b3, b4)
+        if self.neff() < self.num_particles / 2:
+            self.mcl_resample()
         
         # Beam-based obstacle detection
         hit_x, hit_y, angle = self.beam_sensor(robot_pos)
@@ -280,14 +372,15 @@ class SimNode(Node):
             left_lane, right_lane = 0, 0
             
         # Lane offset
+        x_hat, y_hat, yaw_hat = self.mcl_estimated_pose()
+
         lane_offset = np.clip(
-            robot_pos[1] / (self.lane_width / 2), -1.0, 1.0
+            y_hat / (self.lane_width / 2), -1.0, 1.0
         )
-        
-        # Heading error (yaw)
-        yaw = p.getEulerFromQuaternion(robot_orn)[2]
-        heading_error = np.clip(yaw / np.pi, -1.0, 1.0)
-        
+        heading_error = np.clip(
+            yaw_hat / np.pi, -1.0, 1.0
+        )
+
         return np.array([
             b1, b2, b3, b4,
             beam_dist,
@@ -296,7 +389,7 @@ class SimNode(Node):
             heading_error
         ], dtype=np.float32)
     
-    def four_parallel_robot_beams(self, robot_pos, max_range=None, rays_per_beam=5, beam_width=0.2):
+    def four_parallel_robot_beams(self, robot_pos, yaw_override=None, max_range=None, rays_per_beam=5, beam_width=0.2):
         """Emit parallel rays for obstacle detection"""
         if max_range is None:
             max_range = self.max_range / 1.5
@@ -306,8 +399,11 @@ class SimNode(Node):
         LATERAL_GAP = beam_width / 2
         FRONT_OFFSET = 0.3
         
-        _, orn = p.getBasePositionAndOrientation(self.robot_id)
-        yaw = p.getEulerFromQuaternion(orn)[2]
+        if yaw_override is None:
+            _, orn = p.getBasePositionAndOrientation(self.robot_id)
+            yaw = p.getEulerFromQuaternion(orn)[2]
+        else:
+            yaw = yaw_override
         
         fx = math.cos(yaw)
         fy = math.sin(yaw)
@@ -538,6 +634,9 @@ class SimNode(Node):
         
     def simulation_step(self):
         """Main simulation step"""
+        if not self.sim_running:
+            return
+
         # Handle post-episode reset synchronization
         if self.awaiting_post_episode_reset:
             elapsed = time.time() - self.post_episode_reset_time
