@@ -212,9 +212,7 @@ class RLAgentNode(Node):
             self.last_state = state
             self.last_action = action
             self.last_logprob = logprob
-        
-        print(f"Action: {action}, LogProb: {logprob:.4f}")
-        
+                
     def remember_transition(self, reward, done):
         """
         Store transition in agent memory for training.
