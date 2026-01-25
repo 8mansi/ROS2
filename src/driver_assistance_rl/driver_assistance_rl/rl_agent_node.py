@@ -213,7 +213,7 @@ class RLAgentNode(Node):
             self.last_action = action
             self.last_logprob = logprob
         
-        self.get_logger().debug(f"Action: {action}, LogProb: {logprob:.4f}")
+        print(f"Action: {action}, LogProb: {logprob:.4f}")
         
     def remember_transition(self, reward, done):
         """

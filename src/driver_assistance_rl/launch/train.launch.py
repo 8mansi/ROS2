@@ -31,14 +31,14 @@ def generate_launch_description():
             emulate_tty=True
         ),
 
-        # Control node - applies velocities to robot
-        Node(
-            package='driver_assistance_rl',
-            executable='control_node',
-            name='control_node',
-            output='screen',
-            emulate_tty=True
-        ),
+        # # Control node - applies velocities to robot
+        # Node(
+        #     package='driver_assistance_rl',
+        #     executable='control_node',
+        #     name='control_node',
+        #     output='screen',
+        #     emulate_tty=True
+        # ),
 
         # RL Agent node - in training mode
         Node(

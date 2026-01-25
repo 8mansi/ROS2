@@ -27,7 +27,7 @@ setup(
     entry_points={
         'console_scripts': [
             'sim_node = driver_assistance_rl.sim_node:main',
-            'control_node = driver_assistance_rl.control_node:main',
+            # 'control_node = driver_assistance_rl.control_node:main',
             'sensor_node = driver_assistance_rl.sensor_node:main',
             'rl_agent_node = driver_assistance_rl.rl_agent_node:main',
             'training_node = driver_assistance_rl.training_node:main',

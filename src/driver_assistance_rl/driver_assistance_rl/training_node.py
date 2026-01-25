@@ -62,6 +62,10 @@ class TrainingNode(Node):
         self.state_sub = self.create_subscription(
             Float32MultiArray, '/rl/state', self.state_callback, 10
         )
+
+        # self.step_sub = self.create_subscription(
+        #     Float32MultiArray, '/sim/step', self.training_step_callback, 10
+        # )
         
         self.action_sub = self.create_subscription(
             Float32MultiArray, '/rl/action', self.action_callback, 10
@@ -81,12 +85,10 @@ class TrainingNode(Node):
         self.transition_pub = self.create_publisher(
             Float32MultiArray, '/training/transition', 10
         )
-        
-        # Command publisher
-        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+    
         
         # Timer for episode management
-        self.step_timer = self.create_timer(self.timeStep, self.training_step_callback)
+        # self.step_timer = self.create_timer(self.timeStep, self.training_step_callback)
         
         # Storage for current transition
         self.current_state = None
@@ -112,18 +114,19 @@ class TrainingNode(Node):
         
     def state_callback(self, msg):
         """Receive state from sensor"""
-        # Skip state updates during post-episode sync to allow reset to complete
-        if self.awaiting_post_episode_sync:
-            return
+        # # Skip state updates during post-episode sync to allow reset to complete
+        # if self.awaiting_post_episode_sync:
+        #     print("training node - ",self.awaiting_post_episode_sync)
+        #     return
         self.current_state = np.array(msg.data, dtype=np.float32)
         self.first_state_received = True
         self.training_step_callback()
         
     def action_callback(self, msg):
         """Receive action from agent"""
-        # Skip action updates during post-episode sync to allow reset to complete
-        if self.awaiting_post_episode_sync:
-            return
+        # # Skip action updates during post-episode sync to allow reset to complete
+        # if self.awaiting_post_episode_sync:
+        #     return
         self.current_action = int(msg.data[0])
         self.current_logprob = float(msg.data[1])
         self.first_action_received = True
@@ -139,6 +142,7 @@ class TrainingNode(Node):
         if lane_exit:
             self.get_logger().warn("Lane exit detected!")
         
+
     def compute_reward(self, state, action, done):
         """
         Compute reward based on state and action.
@@ -154,7 +158,7 @@ class TrainingNode(Node):
         
         # Obstacle avoidance
         max_beam = max(b1, b2, b3, b4)
-        reward += (1 - max_beam) * 3
+        # reward += (1 - max_beam) * 3
         
         if max_beam > 0.85:
             reward -= 12
@@ -163,7 +167,7 @@ class TrainingNode(Node):
             reward -= 8.0
         
         # Encourage straight driving
-        reward += 2.0 * (1.0 - lane_offset)
+        reward +=  (1.0 - lane_offset)
         reward += 0.5 * (1.0 - heading_error)
         
         left_clear = 1 - max(b1, b3)
@@ -173,16 +177,16 @@ class TrainingNode(Node):
         
         if action == 0:  # STRAIGHT
             if SAFE:
-                reward += 1.5
+                reward += 0.5
             elif max_beam > 0.45:
                 reward -= 4.0
         elif action in (1, 2):  # left/right
             if SAFE:
                 reward -= 0.8
             else:
-                if action == 1 and left_clear > right_clear + 0.15:
+                if action == 1 and left_clear > right_clear :
                     reward += 2.0
-                if action == 2 and right_clear > left_clear + 0.15:
+                if action == 2 and right_clear > left_clear :
                     reward += 2.0
         elif action == 3:  # slow
             if max_beam > 0.55:
@@ -193,6 +197,7 @@ class TrainingNode(Node):
         if done:
             reward -= 20
         
+        print("compute reward - state :",state)
         return reward
         
     def training_step_callback(self):
@@ -235,7 +240,7 @@ class TrainingNode(Node):
             # Use actual done flag from simulation
             reward = self.compute_reward(self.current_state, self.current_action, self.done)
             self.episode_reward += reward
-            print(f"Episode {self.current_episode}, Step {self.step_count}, Reward: {reward:.2f}, Action: {self.current_action}, Total: {self.episode_reward:.2f}")
+            print(f"Episode {self.current_episode}, Step {self.step_count}, Reward: {reward:.2f}, Action: {self.current_action}, Total: {self.episode_reward:.2f}\n")
             
             # Publish transition data for RL agent to store in memory
             trans_msg = Float32MultiArray()

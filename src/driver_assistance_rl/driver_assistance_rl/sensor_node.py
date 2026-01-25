@@ -66,6 +66,7 @@ class SensorNode(Node):
         if self.awaiting_post_episode_reset:
             elapsed = time.time() - self.post_episode_reset_time
             if elapsed < self.post_episode_reset_delay:
+                print("sensornode callback 69-",elapsed," ",self.post_episode_reset_delay)
                 return  # Silently wait
             else:
                 self.awaiting_post_episode_reset = False
@@ -77,6 +78,7 @@ class SensorNode(Node):
         if not self.system_ready:
             elapsed = time.time() - self.startup_time
             if elapsed < self.startup_delay:
+                print("sensornode callback 81-",elapsed," ",self.startup_delay)
                 return  # Silently wait
             else:
                 self.system_ready = True
@@ -88,6 +90,7 @@ class SensorNode(Node):
         # Publish state for RL agent
         out_msg = Float32MultiArray()
         out_msg.data = state.tolist()
+        print("sensornode callback 93-",out_msg.data)
         self.pub.publish(out_msg)
 
 

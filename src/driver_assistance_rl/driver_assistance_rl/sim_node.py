@@ -41,6 +41,9 @@ class SimNode(Node):
         self.weights = None
         self.motion_noise = np.array([0.02, 0.02, 0.01])
         self.sensor_noise = 0.2
+        self.lane_y_sigma = 0.2
+        self.lane_yaw_sigma = 0.1
+
 
         
         # PyBullet setup
@@ -137,8 +140,8 @@ class SimNode(Node):
     def initialize_road(self):
         """Create lanes and road markings"""
         self.road_id = p.loadURDF("plane.urdf")
-        self.left_boundary = self.lane_width - (self.offset * 6)
-        self.right_boundary = -self.lane_width + (self.offset * 6)
+        self.left_boundary = self.lane_width - (self.offset * 2)
+        self.right_boundary = -self.lane_width + (self.offset * 2)
         
         p.changeVisualShape(self.road_id, -1, rgbaColor=[0.5, 0.5, 0.5, 1])
         
@@ -299,24 +302,42 @@ class SimNode(Node):
         self.awaiting_post_episode_reset = True
         self.post_episode_reset_time = time.time()
         self.system_ready = False  # Pause publishing until sync complete
-    
-    def mcl_measurement_update(self, b1, b2, b3, b4):
-        z = np.array([b1, b2, b3, b4])
 
+    def mcl_lane_measurement_update(self, y_meas, yaw_meas):
         for i, ptl in enumerate(self.particles):
-            fake_pos = [ptl[0], ptl[1], self.z_offset]
-            d1, d2, d3, d4 = self.four_parallel_robot_beams(fake_pos, yaw_override=ptl[2])
-            z_hat = np.array([
-                self.norm_beam(d1),
-                self.norm_beam(d2),
-                self.norm_beam(d3),
-                self.norm_beam(d4),
-            ])
-            err = np.linalg.norm(z - z_hat)
-            self.weights[i] = np.exp(-0.5 * (err ** 2) / (self.sensor_noise ** 2))
+            y_hat = ptl[1]
+            yaw_hat = ptl[2]
+
+            err_y = y_meas - y_hat
+            err_yaw = yaw_meas - yaw_hat
+
+            self.weights[i] = np.exp(
+                -0.5 * (
+                    (err_y**2) / (self.lane_y_sigma**2) +
+                    (err_yaw**2) / (self.lane_yaw_sigma**2)
+                )
+            )
 
         self.weights += 1e-9
         self.weights /= np.sum(self.weights)
+
+    # def mcl_measurement_update(self, b1, b2, b3, b4):
+    #     z = np.array([b1, b2, b3, b4])
+
+    #     for i, ptl in enumerate(self.particles):
+    #         fake_pos = [ptl[0], ptl[1], self.z_offset]
+    #         d1, d2, d3, d4 = self.four_parallel_robot_beams(fake_pos, yaw_override=ptl[2])
+    #         z_hat = np.array([
+    #             self.norm_beam(d1),
+    #             self.norm_beam(d2),
+    #             self.norm_beam(d3),
+    #             self.norm_beam(d4),
+    #         ])
+    #         err = np.linalg.norm(z - z_hat)
+    #         self.weights[i] = np.exp(-0.5 * (err ** 2) / (self.sensor_noise ** 2))
+
+    #     self.weights += 1e-9
+    #     self.weights /= np.sum(self.weights)
 
     def mcl_resample(self):
         idx = np.random.choice(
@@ -346,7 +367,12 @@ class SimNode(Node):
         b3 = self.norm_beam(b3)
         b4 = self.norm_beam(b4)
 
-        self.mcl_measurement_update(b1, b2, b3, b4)
+        robot_pos, robot_orn = p.getBasePositionAndOrientation(self.robot_id)
+        yaw = p.getEulerFromQuaternion(robot_orn)[2]
+
+        y_meas = robot_pos[1]
+        yaw_meas = yaw
+        self.mcl_lane_measurement_update(y_meas,yaw_meas)
         if self.neff() < self.num_particles / 2:
             self.mcl_resample()
         
@@ -365,7 +391,7 @@ class SimNode(Node):
         SIDE_THRESHOLD = 0.4
         dist_left = abs(robot_pos[1] - self.left_boundary)
         dist_right = abs(robot_pos[1] - self.right_boundary)
-        
+        print("getstate left -",dist_left," , right -",dist_right)
         if dist_left < SIDE_THRESHOLD or dist_right < SIDE_THRESHOLD:
             left_lane, right_lane = self.check_lane_crossing(self.robot_id)
         else:
@@ -556,7 +582,7 @@ class SimNode(Node):
     def check_lane_crossing(self, robot_id, threshold=20, forward_offset=0.3, z_offset=0.05):
         """Check if robot has crossed lane markings"""
         rgb, _, _ = self.get_lane_camera_image(robot_id)
-        # print("Mean pixel value:", np.mean(rgb))
+        print("Mean pixel value:", np.mean(rgb))
         lane_visible = (np.mean(rgb) > threshold)
         
         pos, _ = p.getBasePositionAndOrientation(robot_id)
