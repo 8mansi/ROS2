@@ -25,7 +25,7 @@ class RLAgentNode(Node):
         
         # Initialize PPO agent
         self.agent = PPOAgent(
-            state_dim=9,
+            state_dim=10,
             action_dim=4
         )
         

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+from .d_star import DStar
+from .lane_feature_slam import LaneFeatureSLAM
 import rclpy
 from rclpy.node import Node
 import pybullet as p
@@ -9,7 +11,6 @@ import math
 import time
 from std_msgs.msg import Float32MultiArray
 from geometry_msgs.msg import Twist
-
 
 class SimNode(Node):
     """
@@ -77,7 +78,15 @@ class SimNode(Node):
         
         # Simulation step timer
         self.timer = self.create_timer(self.timeStep, self.simulation_step)
-        
+        self.feature_slam = LaneFeatureSLAM()
+
+        self.dstar = DStar(
+            width=400,
+            height=40
+        )
+        self.dstar.set_goal((380, 20))  # far ahead center lane
+
+
         # System readiness
         self.system_ready = False
         self.startup_delay = 5  # seconds to wait for ROS2 discovery
@@ -246,6 +255,11 @@ class SimNode(Node):
             cid = car['id']
             pos, orn = p.getBasePositionAndOrientation(cid)
             new_pos = [pos[0] - car['vel'], pos[1], pos[2]]
+
+            cx = int(car['x_pos'] / 0.5)
+            cy = int((car['y_pos'] + self.lane_width) / 0.5)
+            self.dstar.add_obstacle((cx, cy))
+
             p.resetBasePositionAndOrientation(cid, new_pos, orn)
     
     def mcl_motion_update(self, v, w):
@@ -400,6 +414,15 @@ class SimNode(Node):
         # Lane offset
         x_hat, y_hat, yaw_hat = self.mcl_estimated_pose()
 
+        left_lane_y = self.left_boundary
+        right_lane_y = self.right_boundary
+
+        self.feature_slam.update(
+            (x_hat, y_hat, yaw_hat),
+            left_lane_y,
+            right_lane_y
+        )
+
         lane_offset = np.clip(
             y_hat / (self.lane_width / 2), -1.0, 1.0
         )
@@ -407,12 +430,31 @@ class SimNode(Node):
             yaw_hat / np.pi, -1.0, 1.0
         )
 
+        # D* guidance
+        robot_cell = (
+            int(x_hat / 0.5),
+            int((y_hat + self.lane_width) / 0.5)
+        )
+
+        path = self.dstar.plan(robot_cell)
+        if path and robot_cell in path:
+            next_cell = path[robot_cell]
+            dx = next_cell[0] - robot_cell[0]
+            dy = next_cell[1] - robot_cell[1]
+            dstar_heading = math.atan2(dy, dx)
+        else:
+            dstar_heading = 0.0
+
+        dstar_heading_error = np.clip(dstar_heading / np.pi, -1.0, 1.0)
+
+
         return np.array([
             b1, b2, b3, b4,
             beam_dist,
             left_lane, right_lane,
             lane_offset,
-            heading_error
+            heading_error,
+            dstar_heading_error  
         ], dtype=np.float32)
     
     def four_parallel_robot_beams(self, robot_pos, yaw_override=None, max_range=None, rays_per_beam=5, beam_width=0.2):

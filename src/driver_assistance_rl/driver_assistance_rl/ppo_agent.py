@@ -6,7 +6,7 @@ import numpy as np
 
 # PPO NETWORK
 class PPOActorCritic(nn.Module):
-    def __init__(self, state_dim=9, action_dim=4): 
+    def __init__(self, state_dim=10, action_dim=4): 
         super().__init__()
         print("Initializing PPOActorCritic Network")
         self.shared = nn.Sequential(
@@ -51,7 +51,7 @@ class PPOActorCritic(nn.Module):
 class PPOAgent:
     def __init__(
         self,
-        state_dim=9,
+        state_dim=10,
         action_dim=4,
         actor_lr=3e-4,
         critic_lr=1e-3,
