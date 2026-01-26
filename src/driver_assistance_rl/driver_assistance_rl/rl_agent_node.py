@@ -98,6 +98,22 @@ class RLAgentNode(Node):
             10
         )
         
+        # Subscriber to D* path planning for diagnostics
+        self.path_sub = self.create_subscription(
+            Float32MultiArray,
+            '/planning/dstar_path',
+            self.path_callback,
+            10
+        )
+        
+        # Subscriber to SLAM lane map for diagnostics
+        self.slam_sub = self.create_subscription(
+            Float32MultiArray,
+            '/slam/lane_map',
+            self.slam_callback,
+            10
+        )
+        
         self.get_logger().info(f"RLAgentNode initialized in {mode} mode")
         
     def reset_callback(self, msg):
@@ -226,6 +242,22 @@ class RLAgentNode(Node):
                 reward,
                 done
             )
+    
+    def path_callback(self, msg):
+        """Receive D* path planning information for diagnostics"""
+        if len(msg.data) >= 5:
+            robot_x, robot_y, goal_x, goal_y, obstacle_count = msg.data[:5]
+            self.get_logger().debug(
+                f"D* Plan: Robot at ({robot_x:.1f}, {robot_y:.1f}), "
+                f"Goal at ({goal_x:.1f}, {goal_y:.1f}), Obstacles: {int(obstacle_count)}"
+            )
+    
+    def slam_callback(self, msg):
+        """Receive SLAM lane features for diagnostics"""
+        if len(msg.data) >= 3:
+            # SLAM publishes lane features as [a1, b1, c1, a2, b2, c2, ...]
+            num_features = len(msg.data) // 3
+            self.get_logger().debug(f"SLAM detected {num_features} lane features")
     
     def train(self, force=False, entropy_coef=None):
         """Train the agent"""

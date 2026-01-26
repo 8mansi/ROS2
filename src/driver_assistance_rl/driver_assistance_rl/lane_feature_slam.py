@@ -1,25 +1,34 @@
 class LaneFeatureSLAM:
     def __init__(self):
-        self.features = []   # list of lane line parameters
-        self.robot_poses = []  # (x, y, yaw)
+        self.observations = []  # list of observations: {x_pos, left_y, right_y, robot_y, robot_yaw}
+        self.last_stored_x = None
+        self.position_threshold = 0.5  # Only store when robot moved >0.5 units
 
-    def extract_lane_features(self, robot_pose, left_y, right_y):
+    def update(self, robot_pose, left_y, right_y):
         """
-        Lane lines are parallel to x-axis in your env
+        Store lane observations only when robot position changes significantly
         """
         x, y, yaw = robot_pose
 
-        # Left lane: y = left_y
-        # Right lane: y = right_y
-        left_line = (0.0, 1.0, -left_y)
-        right_line = (0.0, 1.0, -right_y)
-
-        self.features.append(left_line)
-        self.features.append(right_line)
-
-    def update(self, robot_pose, left_y, right_y):
-        self.robot_poses.append(robot_pose)
-        self.extract_lane_features(robot_pose, left_y, right_y)
+        # Only add observation if robot moved far enough from last stored position
+        if self.last_stored_x is None or abs(x - self.last_stored_x) > self.position_threshold:
+            self.observations.append({
+                'x_pos': x,
+                'left_y': left_y,
+                'right_y': right_y,
+                'robot_y': y,
+                'robot_yaw': yaw
+            })
+            self.last_stored_x = x
 
     def get_map(self):
-        return self.features
+        """Returns all observations with position context"""
+        return self.observations
+
+    def get_estimated_lanes(self):
+        """Returns global lane estimates by averaging observations"""
+        if not self.observations:
+            return None, None
+        est_left = sum(obs['left_y'] for obs in self.observations) / len(self.observations)
+        est_right = sum(obs['right_y'] for obs in self.observations) / len(self.observations)
+        return est_left, est_right

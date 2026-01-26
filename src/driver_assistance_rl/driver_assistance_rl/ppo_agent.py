@@ -89,7 +89,10 @@ class PPOAgent:
         front_dist = state[4]  # front distance
         left_dist  = state[0]  # left distance
         right_dist = state[1]  # right distance
+        lane_offset = state[7]  # lane offset from center
+        dstar_heading = state[9]  # D* suggested heading
 
+        # Safety constraints: remove unsafe actions
         if front_dist > 1 - 0.35 and 0 in safe_actions:
             safe_actions.remove(0)
         if left_dist > 1 - 0.25 and 1 in safe_actions:
@@ -102,6 +105,19 @@ class PPOAgent:
         mask = torch.zeros_like(logits)
         mask[safe_actions] = 1.0
         masked_logits = logits + (mask + 1e-8).log()  # avoid log(0)
+
+        # Apply D* guidance: boost actions that align with planned path
+        # Action 0: straight (when dstar_heading near 0)
+        # Action 1: left turn (when dstar_heading > 0.3)
+        # Action 2: right turn (when dstar_heading < -0.3)
+        # Action 3: slow down
+        dstar_boost = 0.2
+        if dstar_heading > 0.3:
+            masked_logits[1] += dstar_boost  # Boost left turn
+        elif dstar_heading < -0.3:
+            masked_logits[2] += dstar_boost  # Boost right turn
+        else:
+            masked_logits[0] += dstar_boost * 0.5  # Slightly boost straight
 
         dist_pi = dist.Categorical(logits=masked_logits)
         action = dist_pi.sample()

@@ -76,15 +76,33 @@ class SimNode(Node):
             Float32MultiArray, '/sim/done', 10
         )
         
+        # Publisher for SLAM map (lane features)
+        self.slam_map_pub = self.create_publisher(
+            Float32MultiArray, '/slam/lane_map', 10
+        )
+        
+        # Publisher for D* path planning
+        self.path_pub = self.create_publisher(
+            Float32MultiArray, '/planning/dstar_path', 10
+        )
+        
         # Simulation step timer
         self.timer = self.create_timer(self.timeStep, self.simulation_step)
+        
+        # Initialize SLAM system
         self.feature_slam = LaneFeatureSLAM()
-
+        
+        # Initialize D* path planner
         self.dstar = DStar(
             width=400,
             height=40
         )
         self.dstar.set_goal((380, 20))  # far ahead center lane
+        self.dstar.obstacles = set()  # Clean slate
+        
+        # D* planning parameters
+        self.dstar_plan_frequency = 10  # Plan every N steps
+        self.dstar_step_counter = 0
 
 
         # System readiness
@@ -386,7 +404,7 @@ class SimNode(Node):
 
         y_meas = robot_pos[1]
         yaw_meas = yaw
-        self.mcl_lane_measurement_update(y_meas,yaw_meas)
+        self.mcl_lane_measurement_update(y_meas, yaw_meas)
         if self.neff() < self.num_particles / 2:
             self.mcl_resample()
         
@@ -405,50 +423,71 @@ class SimNode(Node):
         SIDE_THRESHOLD = 0.4
         dist_left = abs(robot_pos[1] - self.left_boundary)
         dist_right = abs(robot_pos[1] - self.right_boundary)
-        print("getstate left -",dist_left," , right -",dist_right)
         if dist_left < SIDE_THRESHOLD or dist_right < SIDE_THRESHOLD:
             left_lane, right_lane = self.check_lane_crossing(self.robot_id)
         else:
             left_lane, right_lane = 0, 0
             
-        # Lane offset
+        # MCL-estimated pose (from SLAM-like particle filter)
         x_hat, y_hat, yaw_hat = self.mcl_estimated_pose()
 
+        # Lane feature extraction via SLAM
         left_lane_y = self.left_boundary
         right_lane_y = self.right_boundary
-
         self.feature_slam.update(
             (x_hat, y_hat, yaw_hat),
             left_lane_y,
             right_lane_y
         )
+        # Get SLAM estimated lanes (if available)
+        est_left, est_right = self.feature_slam.get_estimated_lanes()
+        if est_left is not None:
+            # Use SLAM estimates
+            lane_center_estimate = (est_left + est_right) / 2
+        else:
+            # Fallback to ground truth initially
+            lane_center_estimate = (self.left_boundary + self.right_boundary) / 2
 
+        # Lane state features (relative to SLAM estimate, not ground truth)
         lane_offset = np.clip(
-            y_hat / (self.lane_width / 2), -1.0, 1.0
+            y_hat / lane_center_estimate, -1.0, 1.0
         )
+        # # Lane state features
+        # lane_offset = np.clip(
+        #     y_hat / (self.lane_width / 2), -1.0, 1.0
+        # )
         heading_error = np.clip(
             yaw_hat / np.pi, -1.0, 1.0
         )
 
-        # D* guidance
+        # D* path planning for navigation guidance
         robot_cell = (
-            int(x_hat / 0.5),
+            int((x_hat + 10) / 0.5),  # Offset for positive indexing
             int((y_hat + self.lane_width) / 0.5)
         )
+        
+        # Clamp to grid bounds
+        robot_cell = (
+            np.clip(robot_cell[0], 0, self.dstar.width - 1),
+            np.clip(robot_cell[1], 0, self.dstar.height - 1)
+        )
 
-        path = self.dstar.plan(robot_cell)
-        if path and robot_cell in path:
-            next_cell = path[robot_cell]
-            dx = next_cell[0] - robot_cell[0]
-            dy = next_cell[1] - robot_cell[1]
-            dstar_heading = math.atan2(dy, dx)
-        else:
-            dstar_heading = 0.0
+        # Plan path periodically to reduce computation
+        dstar_heading_error = 0.0
+        if robot_cell != getattr(self, 'last_robot_cell', None):
+            self.last_robot_cell = robot_cell
+            try:
+                path = self.dstar.plan(robot_cell)
+                if path and robot_cell in path:
+                    next_cell = path[robot_cell]
+                    dx = next_cell[0] - robot_cell[0]
+                    dy = next_cell[1] - robot_cell[1]
+                    dstar_heading = math.atan2(dy, dx)
+                    dstar_heading_error = np.clip(dstar_heading / np.pi, -1.0, 1.0)
+            except Exception as e:
+                self.get_logger().debug(f"D* planning error: {e}")
 
-        dstar_heading_error = np.clip(dstar_heading / np.pi, -1.0, 1.0)
-
-
-        return np.array([
+        state = np.array([
             b1, b2, b3, b4,
             beam_dist,
             left_lane, right_lane,
@@ -456,6 +495,8 @@ class SimNode(Node):
             heading_error,
             dstar_heading_error  
         ], dtype=np.float32)
+        
+        return state
     
     def four_parallel_robot_beams(self, robot_pos, yaw_override=None, max_range=None, rays_per_beam=5, beam_width=0.2):
         """Emit parallel rays for obstacle detection"""
@@ -745,6 +786,44 @@ class SimNode(Node):
             msg = Float32MultiArray()
             msg.data = state.tolist()
             self.step_pub.publish(msg)
+            
+            # Publish SLAM lane features periodically
+            if self.dstar_step_counter % 5 == 0:
+                slam_map = self.feature_slam.get_map()
+                if slam_map:
+                    slam_msg = Float32MultiArray()
+                    # Publish observations with position context: [x1, left_y1, right_y1, robot_y1, x2, ...]
+                    slam_msg.data = [float(obs['x_pos']) for obs in slam_map for obs in [obs]] + \
+                                    [float(obs['left_y']) for obs in slam_map] + \
+                                    [float(obs['right_y']) for obs in slam_map] + \
+                                    [float(obs['robot_y']) for obs in slam_map]
+                    self.slam_map_pub.publish(slam_msg)
+            
+            # Publish D* path planning info periodically
+            if self.dstar_step_counter % 10 == 0:
+                robot_pos, _ = p.getBasePositionAndOrientation(self.robot_id)
+                x_hat, y_hat, yaw_hat = self.mcl_estimated_pose()
+                robot_cell = (
+                    np.clip(int((x_hat + 10) / 0.5), 0, self.dstar.width - 1),
+                    np.clip(int((y_hat + self.lane_width) / 0.5), 0, self.dstar.height - 1)
+                )
+                try:
+                    path = self.dstar.plan(robot_cell)
+                    # Publish goal position
+                    goal = self.dstar.goal
+                    path_msg = Float32MultiArray()
+                    path_msg.data = [
+                        float(robot_cell[0]),
+                        float(robot_cell[1]),
+                        float(goal[0]),
+                        float(goal[1]),
+                        float(len(self.dstar.obstacles))  # obstacle count
+                    ]
+                    self.path_pub.publish(path_msg)
+                except Exception as e:
+                    self.get_logger().debug(f"Path planning publish error: {e}")
+            
+            self.dstar_step_counter += 1
             
             # Update camera to follow robot
             try:
