@@ -151,6 +151,9 @@ class SimNode(Node):
         self.cars = []
         self.spawn_cars(self.num_cars)
         self.init_particles()
+        self.particles[:, 0] = self.robot_start_pos[0]
+        self.particles[:, 1] = self.robot_start_pos[1]
+        self.particles[:, 2] = 0.0
 
         self.trajectory = []
         self.danger_points = []
@@ -315,6 +318,7 @@ class SimNode(Node):
         if hasattr(self, 'timer'):
             self.timer.cancel()
         try:
+            print("Disconnecting PyBullet...")
             p.disconnect()
         except:
             pass
@@ -386,117 +390,208 @@ class SimNode(Node):
 
     def neff(self):
         return 1.0 / np.sum(self.weights ** 2)
-
-
+    
     def get_state(self):
-        """Get comprehensive state from simulation"""
-        robot_pos, robot_orn = p.getBasePositionAndOrientation(self.robot_id)
-        
-        # Get beam sensor readings
-        b1, b2, b3, b4 = self.four_parallel_robot_beams(robot_pos)
-        b1 = self.norm_beam(b1)
-        b2 = self.norm_beam(b2)
-        b3 = self.norm_beam(b3)
-        b4 = self.norm_beam(b4)
-
-        robot_pos, robot_orn = p.getBasePositionAndOrientation(self.robot_id)
-        yaw = p.getEulerFromQuaternion(robot_orn)[2]
-
-        y_meas = robot_pos[1]
-        yaw_meas = yaw
-        self.mcl_lane_measurement_update(y_meas, yaw_meas)
-        if self.neff() < self.num_particles / 2:
-            self.mcl_resample()
-        
-        # Beam-based obstacle detection
-        hit_x, hit_y, angle = self.beam_sensor(robot_pos)
-        if hit_x == 0 and hit_y == 0:
-            beam_dist = self.max_range
-        else:
-            beam_dist = np.linalg.norm(
-                np.array([hit_x, hit_y]) - np.array(robot_pos[:2])
-            )
-        beam_dist = np.clip(beam_dist, 0, self.max_range)
-        beam_dist = (self.max_range - beam_dist) / self.max_range
-        
-        # Lane crossing check
-        SIDE_THRESHOLD = 0.4
-        dist_left = abs(robot_pos[1] - self.left_boundary)
-        dist_right = abs(robot_pos[1] - self.right_boundary)
-        if dist_left < SIDE_THRESHOLD or dist_right < SIDE_THRESHOLD:
-            left_lane, right_lane = self.check_lane_crossing(self.robot_id)
-        else:
-            left_lane, right_lane = 0, 0
+        """
+        Comprehensive State Construction:
+        Indices: 0-3 (Beams), 4 (Dist), 5-6 (Lanes), 7 (SLAM Offset), 8 (Heading), 9 (D* Error)
+        """
+        try:
+            # --- A. POSE ESTIMATION (MCL) ---
+            robot_pos, robot_orn = p.getBasePositionAndOrientation(self.robot_id)
+            yaw = p.getEulerFromQuaternion(robot_orn)[2]
             
-        # MCL-estimated pose (from SLAM-like particle filter)
-        x_hat, y_hat, yaw_hat = self.mcl_estimated_pose()
+            # Perform MCL Particle Update
+            self.mcl_lane_measurement_update(robot_pos[1], yaw)
+            # if self.neff() < self.num_particles / 2:
+            #     self.mcl_resample()
+            
+            # Force ground-truth alignment during the first 5 steps to stabilize initialization
+            if self.dstar_step_counter < 5:
+                self.particles[:, 1] = robot_pos[1]  # Align Y to ground truth
+                self.particles[:, 2] = yaw           # Align Yaw to ground truth
+                x_hat, y_hat, yaw_hat = robot_pos[0], robot_pos[1], yaw
+            else:   
+                x_hat, y_hat, yaw_hat = self.mcl_estimated_pose()
 
-        # Lane feature extraction via SLAM
-        left_lane_y = self.left_boundary
-        right_lane_y = self.right_boundary
-        self.feature_slam.update(
-            (x_hat, y_hat, yaw_hat),
-            left_lane_y,
-            right_lane_y
-        )
-        # Get SLAM estimated lanes (if available)
-        est_left, est_right = self.feature_slam.get_estimated_lanes()
-        if est_left is not None:
-            # Use SLAM estimates
-            lane_center_estimate = (est_left + est_right) / 2
-        else:
-            # Fallback to ground truth initially
-            lane_center_estimate = (self.left_boundary + self.right_boundary) / 2
+            # --- B. FEATURE MAPPING (SLAM) ---
+            # Get local estimates from the SLAM history
+            est_left, est_right = self.feature_slam.get_estimated_lanes()
+            left_flag, right_flag = self.check_lane_crossing(self.robot_id)
+            # --- C. DYNAMIC LANE & SENSOR LOGIC ---
+            # Fix: Default lane_center to 0.0 if SLAM is empty to prevent offset = 1.0 at start
+            if est_left is not None and est_right is not None:
+                lane_center = (est_left + est_right) / 2
+            else:
+                lane_center = 0.0 
 
-        # Lane state features (relative to SLAM estimate, not ground truth)
-        lane_offset = np.clip(
-            y_hat / lane_center_estimate, -1.0, 1.0
-        )
-        # # Lane state features
-        # lane_offset = np.clip(
-        #     y_hat / (self.lane_width / 2), -1.0, 1.0
-        # )
-        heading_error = np.clip(
-            yaw_hat / np.pi, -1.0, 1.0
-        )
+            half_width = self.lane_width / 2.0
+            lane_offset = (y_hat - lane_center) / half_width
 
-        # D* path planning for navigation guidance
-        robot_cell = (
-            int((x_hat + 10) / 0.5),  # Offset for positive indexing
-            int((y_hat + self.lane_width) / 0.5)
-        )
+            if left_flag > 0 or right_flag > 0:
+                self.feature_slam.update((x_hat, y_hat, yaw_hat), left_flag, right_flag)
+            
+            # # Logic for Active Sensing: Trigger camera if we are near edge OR map is empty
+            # active_sensing_needed = True
+            # if len(self.feature_slam.observations) > 5 and abs(lane_offset) < 0.7:
+            #     active_sensing_needed = False
+
+            # # Trigger camera check only when needed
+            # left_flag, right_flag = 0.0, 0.0
+            # if active_sensing_needed:
+            #     l_check, r_check = self.check_lane_crossing(self.robot_id)
+            #     left_flag, right_flag = float(l_check), float(r_check)
+            #     # Feed camera findings back into SLAM to "fix" the map
+            #     self.feature_slam.update((x_hat, y_hat, yaw_hat), l_check, r_check)
+
+            # --- D. PATH PLANNING (D*) ---
+            dstar_error = 0.0
+            robot_cell = (int((x_hat + 10) / 0.5), int((y_hat + 2.0) / 0.5))
+            
+            came_from = self.dstar.plan(robot_cell)
+            if came_from and self.dstar.goal in came_from:
+                dx = self.dstar.goal[0] - robot_cell[0]
+                dy = self.dstar.goal[1] - robot_cell[1]
+                
+                if abs(dx) > 1 or abs(dy) > 1:
+                    target_yaw = math.atan2(dy, dx)
+                    # Shortest path angular difference
+                    diff = target_yaw - yaw_hat
+                    while diff > math.pi: diff -= 2*math.pi
+                    while diff < -math.pi: diff += 2*math.pi
+                    dstar_error = np.clip(diff / math.pi, -1.0, 1.0)
+
+            # --- E. COMPILE STATE VECTOR ---
+            b1, b2, b3, b4 = self.four_parallel_robot_beams(robot_pos)
+            
+            hit_x, hit_y, _ = self.beam_sensor(robot_pos)
+            beam_dist = np.linalg.norm(np.array([hit_x, hit_y]) - np.array(robot_pos[:2])) if hit_x != 0 else self.max_range
+            
+            state_list = [
+                self.norm_beam(b1), self.norm_beam(b2), self.norm_beam(b3), self.norm_beam(b4),
+                np.clip((self.max_range - beam_dist) / self.max_range, 0, 1),
+                left_flag,    # Index 5
+                right_flag,   # Index 6
+                lane_offset,  # Index 7 (Fixed Normalization)
+                np.clip(yaw_hat / np.pi, -1.0, 1.0),
+                dstar_error   
+            ]
+
+            return np.array(state_list, dtype=np.float32)
+
+        except Exception as e:
+            self.get_logger().error(f"Critical State Error: {e}")
+            return np.zeros(10, dtype=np.float32)
         
-        # Clamp to grid bounds
-        robot_cell = (
-            np.clip(robot_cell[0], 0, self.dstar.width - 1),
-            np.clip(robot_cell[1], 0, self.dstar.height - 1)
-        )
-
-        # Plan path periodically to reduce computation
-        dstar_heading_error = 0.0
-        if robot_cell != getattr(self, 'last_robot_cell', None):
-            self.last_robot_cell = robot_cell
-            try:
-                path = self.dstar.plan(robot_cell)
-                if path and robot_cell in path:
-                    next_cell = path[robot_cell]
-                    dx = next_cell[0] - robot_cell[0]
-                    dy = next_cell[1] - robot_cell[1]
-                    dstar_heading = math.atan2(dy, dx)
-                    dstar_heading_error = np.clip(dstar_heading / np.pi, -1.0, 1.0)
-            except Exception as e:
-                self.get_logger().debug(f"D* planning error: {e}")
-
-        state = np.array([
-            b1, b2, b3, b4,
-            beam_dist,
-            left_lane, right_lane,
-            lane_offset,
-            heading_error,
-            dstar_heading_error  
-        ], dtype=np.float32)
+    # def get_state(self):
+    #     """Get comprehensive state from simulation"""
+    #     robot_pos, robot_orn = p.getBasePositionAndOrientation(self.robot_id)
         
-        return state
+    #     # Get beam sensor readings
+    #     b1, b2, b3, b4 = self.four_parallel_robot_beams(robot_pos)
+    #     b1 = self.norm_beam(b1)
+    #     b2 = self.norm_beam(b2)
+    #     b3 = self.norm_beam(b3)
+    #     b4 = self.norm_beam(b4)
+
+    #     robot_pos, robot_orn = p.getBasePositionAndOrientation(self.robot_id)
+    #     yaw = p.getEulerFromQuaternion(robot_orn)[2]
+
+    #     y_meas = robot_pos[1]
+    #     yaw_meas = yaw
+    #     self.mcl_lane_measurement_update(y_meas, yaw_meas)
+    #     if self.neff() < self.num_particles / 2:
+    #         self.mcl_resample()
+        
+    #     # Beam-based obstacle detection
+    #     hit_x, hit_y, angle = self.beam_sensor(robot_pos)
+    #     if hit_x == 0 and hit_y == 0:
+    #         beam_dist = self.max_range
+    #     else:
+    #         beam_dist = np.linalg.norm(
+    #             np.array([hit_x, hit_y]) - np.array(robot_pos[:2])
+    #         )
+    #     beam_dist = np.clip(beam_dist, 0, self.max_range)
+    #     beam_dist = (self.max_range - beam_dist) / self.max_range
+        
+    #     # Lane crossing check
+    #     SIDE_THRESHOLD = 0.4
+    #     dist_left = abs(robot_pos[1] - self.left_boundary)
+    #     dist_right = abs(robot_pos[1] - self.right_boundary)
+    #     if dist_left < SIDE_THRESHOLD or dist_right < SIDE_THRESHOLD:
+    #         left_lane, right_lane = self.check_lane_crossing(self.robot_id)
+    #     else:
+    #         left_lane, right_lane = 0, 0
+            
+    #     # MCL-estimated pose (from SLAM-like particle filter)
+    #     x_hat, y_hat, yaw_hat = self.mcl_estimated_pose()
+
+    #     # Lane feature extraction via SLAM
+    #     left_lane_y = self.left_boundary
+    #     right_lane_y = self.right_boundary
+    #     self.feature_slam.update(
+    #         (x_hat, y_hat, yaw_hat),
+    #         left_lane_y,
+    #         right_lane_y
+    #     )
+    #     # Get SLAM estimated lanes (if available)
+    #     est_left, est_right = self.feature_slam.get_estimated_lanes()
+    #     if est_left is not None:
+    #         # Use SLAM estimates
+    #         lane_center_estimate = (est_left + est_right) / 2
+    #     else:
+    #         # Fallback to ground truth initially
+    #         lane_center_estimate = (self.left_boundary + self.right_boundary) / 2
+
+    #     # Lane state features (relative to SLAM estimate, not ground truth)
+    #     lane_offset = np.clip(
+    #         y_hat / lane_center_estimate, -1.0, 1.0
+    #     )
+    #     # # Lane state features
+    #     # lane_offset = np.clip(
+    #     #     y_hat / (self.lane_width / 2), -1.0, 1.0
+    #     # )
+    #     heading_error = np.clip(
+    #         yaw_hat / np.pi, -1.0, 1.0
+    #     )
+
+    #     # D* path planning for navigation guidance
+    #     robot_cell = (
+    #         int((x_hat + 10) / 0.5),  # Offset for positive indexing
+    #         int((y_hat + self.lane_width) / 0.5)
+    #     )
+        
+    #     # Clamp to grid bounds
+    #     robot_cell = (
+    #         np.clip(robot_cell[0], 0, self.dstar.width - 1),
+    #         np.clip(robot_cell[1], 0, self.dstar.height - 1)
+    #     )
+
+    #     # Plan path periodically to reduce computation
+    #     dstar_heading_error = 0.0
+    #     if robot_cell != getattr(self, 'last_robot_cell', None):
+    #         self.last_robot_cell = robot_cell
+    #         try:
+    #             path = self.dstar.plan(robot_cell)
+    #             if path and robot_cell in path:
+    #                 next_cell = path[robot_cell]
+    #                 dx = next_cell[0] - robot_cell[0]
+    #                 dy = next_cell[1] - robot_cell[1]
+    #                 dstar_heading = math.atan2(dy, dx)
+    #                 dstar_heading_error = np.clip(dstar_heading / np.pi, -1.0, 1.0)
+    #         except Exception as e:
+    #             self.get_logger().debug(f"D* planning error: {e}")
+
+    #     state = np.array([
+    #         b1, b2, b3, b4,
+    #         beam_dist,
+    #         left_lane, right_lane,
+    #         lane_offset,
+    #         heading_error,
+    #         dstar_heading_error  
+    #     ], dtype=np.float32)
+        
+    #     return state
     
     def four_parallel_robot_beams(self, robot_pos, yaw_override=None, max_range=None, rays_per_beam=5, beam_width=0.2):
         """Emit parallel rays for obstacle detection"""
@@ -661,26 +756,58 @@ class SimNode(Node):
         """Normalize beam distance: 0 = safe, 1 = close"""
         d = np.clip(d, 0, self.max_range)
         return (self.max_range - d) / self.max_range
+    
+    def check_lane_crossing(self, robot_id, threshold=20):
+        """
+        Detects if the robot is physically touching or crossing the lane lines.
+        Returns: (left_flag, right_flag) as 1.0 or 0.0
+        """
+        gray, _, _ = self.get_lane_camera_image(robot_id)
+        mean_val = np.mean(gray)
         
-    def check_lane_crossing(self, robot_id, threshold=20, forward_offset=0.3, z_offset=0.05):
-        """Check if robot has crossed lane markings"""
-        rgb, _, _ = self.get_lane_camera_image(robot_id)
-        print("Mean pixel value:", np.mean(rgb))
-        lane_visible = (np.mean(rgb) > threshold)
-        
+        # Ground Truth Y-position
         pos, _ = p.getBasePositionAndOrientation(robot_id)
         robot_y = pos[1]
         
-        left_lane = False
-        right_lane = False
+        left_flag = 0.0
+        right_flag = 0.0
         
-        if lane_visible:
-            if robot_y > 0:
-                left_lane = True
-            elif robot_y < 0:
-                right_lane = True
+        # The 'Physical' Lane Boundary (usually half the lane width)
+        boundary = self.lane_width / 2.0 
+
+        # Case A: Camera sees the white line (Direct Sensing)
+        if mean_val > threshold:
+            if robot_y > 0: left_flag = 1.0
+            else: right_flag = 1.0
+        
+        # Case B: Safety Fallback (If robot is physically past the line)
+        # This prevents 'reward bleeding' if the camera is blind
+        if robot_y > boundary:
+            left_flag = 1.0
+        elif robot_y < -boundary:
+            right_flag = 1.0
                 
-        return left_lane, right_lane
+        return left_flag, right_flag
+    
+    # def check_lane_crossing(self, robot_id, threshold=20, forward_offset=0.3, z_offset=0.05):
+    #     """Check if robot has crossed lane markings"""
+    #     rgb, _, _ = self.get_lane_camera_image(robot_id)
+    #     print("Mean pixel value:", np.mean(rgb))
+    #     lane_visible = (np.mean(rgb) > threshold)
+        
+    #     pos, _ = p.getBasePositionAndOrientation(robot_id)
+    #     robot_y = pos[1]
+        
+    #     left_lane = False
+    #     right_lane = False
+        
+    #     if lane_visible:
+    #         if robot_y > 0:
+    #             left_lane = True
+    #         elif robot_y < 0:
+    #             right_lane = True
+                
+    #     return left_lane, right_lane
         
     def get_lane_camera_image(self, robot_id, z_offset=0.2, forward_offset=0.3):
         """Get camera image from robot perspective"""
