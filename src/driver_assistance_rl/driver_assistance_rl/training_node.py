@@ -20,7 +20,7 @@ class TrainingNode(Node):
         super().__init__('training_node')
         self.training_complete = False 
         # Training hyperparameters
-        self.EPISODES = 10
+        self.EPISODES = 100
         self.STEPS_PER_EPISODE = 500
         self.timeStep = 0.1
         self.max_range = 3
@@ -142,81 +142,92 @@ class TrainingNode(Node):
         if lane_exit:
             self.get_logger().warn("Lane exit detected!")
 
-    def compute_reward(self, state, action, done):
-        # state[9] is D* error
-        # state[7] is Lane Offset
-        
-        # Penalize the SQUARE of the errors to punish large deviations heavily
-        dstar_penalty = 4.0 * (state[9]**2)
-        offset_penalty = 2.0 * (state[7]**2)
-        
-        reward = 2.0 - dstar_penalty - offset_penalty
-
-        # If camera lost lane (based on your log triggering 0.0 mean)
-        if abs(state[7]) >= 1.0:
-            reward -= 10.0
-            
-        if done:
-            reward -= 50.0 # Heavy crash penalty
-        print("compute reward - state :",state)
-        return reward
-
     # def compute_reward(self, state, action, done):
-    #     """
-    #     Compute reward based on state and action.
-    #     Adapted from DriverAssistanceSim.compute_reward()
-    #     """
-    #     reward = 0
-    #     b1, b2, b3, b4 = state[0], state[1], state[2], state[3]
-    #     beam_dist = state[4]
-    #     left_lane = state[5]
-    #     right_lane = state[6]
-    #     lane_offset = abs(state[7])
-    #     heading_error = abs(state[8])
+    #     # state[9] is D* error
+    #     # state[7] is Lane Offset
         
-    #     # Obstacle avoidance
-    #     max_beam = max(b1, b2, b3, b4)
-    #     # reward += (1 - max_beam) * 3
+    #     # Penalize the SQUARE of the errors to punish large deviations heavily
+    #     dstar_penalty = 4.0 * (state[9]**2)
+    #     offset_penalty = 2.0 * (state[7]**2)
         
-    #     if max_beam > 0.85:
-    #         reward -= 12
-        
-    #     if left_lane or right_lane:
-    #         reward -= 8.0
-        
-    #     # Encourage straight driving
-    #     reward +=  (1.0 - lane_offset)
-    #     reward += 0.5 * (1.0 - heading_error)
-        
-    #     left_clear = 1 - max(b1, b3)
-    #     right_clear = 1 - max(b2, b4)
-    #     SAFE = max_beam < 0.30
-    #     DANGER = max_beam > 0.45
-        
-    #     if action == 0:  # STRAIGHT
-    #         if SAFE:
-    #             reward += 0.5
-    #         elif max_beam > 0.45:
-    #             reward -= 4.0
-    #     elif action in (1, 2):  # left/right
-    #         if SAFE:
-    #             reward -= 0.8
-    #         else:
-    #             if action == 1 and left_clear > right_clear :
-    #                 reward += 2.0
-    #             if action == 2 and right_clear > left_clear :
-    #                 reward += 2.0
-    #     elif action == 3:  # slow
-    #         if max_beam > 0.55:
-    #             reward += 1.0
-    #         else:
-    #             reward -= 0.5
-        
+    #     reward = 2.0 - dstar_penalty - offset_penalty
+
+    #     # If camera lost lane (based on your log triggering 0.0 mean)
+    #     if abs(state[7]) >= 1.0:
+    #         print("Lane lost penalty applied - ",state[7])
+    #         reward -= 10.0
+            
     #     if done:
-    #         reward -= 20
-        
+    #         reward -= 50.0 # Heavy crash penalty
     #     print("compute reward - state :",state)
     #     return reward
+
+    def compute_reward(self, state, action, done):
+        """
+        Compute reward based on state and action.
+        Adapted from DriverAssistanceSim.compute_reward()
+        """
+        reward = 0
+        b1, b2, b3, b4 = state[0], state[1], state[2], state[3]
+        beam_dist = state[4]
+        left_lane = state[5]
+        right_lane = state[6]
+        lane_offset = abs(state[7])
+        heading_error = abs(state[8])
+        
+        # Obstacle avoidance
+        max_beam = max(b1, b2, b3, b4)
+        # reward += (1 - max_beam) * 3
+        
+        if max_beam > 0.85:
+            reward -= 12
+        
+        if left_lane or right_lane:
+            reward -= 8.0
+        
+        # Encourage straight driving
+        reward +=  (1.0 - lane_offset)
+        reward += 0.5 * (1.0 - heading_error)
+        
+        left_clear = 1 - max(b1, b3)
+        right_clear = 1 - max(b2, b4)
+        SAFE = max_beam < 0.30
+        DANGER = max_beam > 0.45
+        
+        if action == 0:  # STRAIGHT
+            if SAFE:
+                reward += 0.5
+            elif max_beam > 0.45:
+                reward -= 4.0
+        elif action in (1, 2):  # left/right
+            if SAFE:
+                reward -= 0.8
+            else:
+                if action == 1 and left_clear > right_clear :
+                    reward += 2.0
+                if action == 2 and right_clear > left_clear :
+                    reward += 2.0
+        elif action == 3:  # slow
+            if max_beam > 0.55:
+                reward += 1.0
+            else:
+                reward -= 0.5
+        
+        if done:
+            reward -= 20
+        
+        # print("compute reward - state :",state)
+        return reward
+    
+    def get_action_str(self, action):
+        """Convert action index to string"""
+        action_map = {
+            0: "STRAIGHT",
+            1: "LEFT",
+            2: "RIGHT",
+            3: "SLOW"
+        }
+        return action_map.get(action, "UNKNOWN")
         
     def training_step_callback(self):
         """Main training loop step"""
@@ -258,7 +269,7 @@ class TrainingNode(Node):
             # Use actual done flag from simulation
             reward = self.compute_reward(self.current_state, self.current_action, self.done)
             self.episode_reward += reward
-            print(f"Episode {self.current_episode}, Step {self.step_count}, Reward: {reward:.2f}, Action: {self.current_action}, Total: {self.episode_reward:.2f}\n")
+            print(f"Episode {self.current_episode}, Step {self.step_count}, Reward: {reward:.2f}, Action: {self.get_action_str(self.current_action)}, Total: {self.episode_reward:.2f}\n")
             
             # Publish transition data for RL agent to store in memory
             trans_msg = Float32MultiArray()

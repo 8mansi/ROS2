@@ -38,12 +38,14 @@ class SimNode(Node):
 
         # --- MCL parameters ---
         self.num_particles = 200
-        self.particles = None  # [x, y, yaw]
-        self.weights = None
+        self.particles = []  # [x, y, yaw]
+        self.weights = np.ones(self.num_particles) / self.num_particles
         self.motion_noise = np.array([0.02, 0.02, 0.01])
         self.sensor_noise = 0.2
-        self.lane_y_sigma = 0.2
-        self.lane_yaw_sigma = 0.1
+        self.lane_y_sigma = 0.08
+        self.lane_yaw_sigma = 0.05
+        self.last_v = 0.0
+        self.last_omega = 0.0
 
 
         
@@ -65,6 +67,10 @@ class SimNode(Node):
         # Subscriber for reset requests
         self.reset_sub = self.create_subscription(
             Float32MultiArray, '/sim/reset', self.reset_callback, 10
+        )
+
+        self.reset_sub_inference = self.create_subscription(
+            Float32MultiArray, '/sim/reset_inference', self.reset_callback, 10
         )
         
         self.step_pub = self.create_publisher(
@@ -97,7 +103,7 @@ class SimNode(Node):
             width=400,
             height=40
         )
-        self.dstar.set_goal((380, 20))  # far ahead center lane
+        self.dstar.set_goal((self.num_steps, 0))  # far ahead center lane
         self.dstar.obstacles = set()  # Clean slate
         
         # D* planning parameters
@@ -118,17 +124,33 @@ class SimNode(Node):
         
         self.get_logger().info("SimNode initialized")
     
-    def init_particles(self):
-        self.particles = np.zeros((self.num_particles, 3))
+    def init_particles(self, num_particles=200):
+        self.num_particles = num_particles
+        self.particles = []
+    
+        pos, orn = p.getBasePositionAndOrientation(self.robot_id)
+        yaw0 = p.getEulerFromQuaternion(orn)[2]
+    
+        for _ in range(num_particles):
+            x = np.random.normal(pos[0], 0.05)
+            y = np.random.normal(pos[1], 0.02)
+            yaw = np.random.normal(yaw0, 0.02)
+    
+            # Keep particles within physical lane bounds
+            y = float(np.clip(
+                y,
+                -self.lane_width + (self.offset * 2),
+                self.lane_width - (self.offset * 2)
+            ))
+    
+            self.particles.append({
+                'x': x,
+                'y': y,
+                'yaw': yaw,
+                'w': 1.0 / num_particles
+            })
+    
         self.weights = np.ones(self.num_particles) / self.num_particles
-
-        x0, y0, _ = self.robot_start_pos
-        yaw0 = 0.0
-
-        self.particles[:, 0] = x0 + np.random.randn(self.num_particles) * 0.2
-        self.particles[:, 1] = y0 + np.random.randn(self.num_particles) * 0.2
-        self.particles[:, 2] = yaw0 + np.random.randn(self.num_particles) * 0.05
-
         
     def reset_simulation(self):
         """Reset the entire simulation"""
@@ -151,9 +173,9 @@ class SimNode(Node):
         self.cars = []
         self.spawn_cars(self.num_cars)
         self.init_particles()
-        self.particles[:, 0] = self.robot_start_pos[0]
-        self.particles[:, 1] = self.robot_start_pos[1]
-        self.particles[:, 2] = 0.0
+        # self.particles[:, 0] = self.robot_start_pos[0]
+        # self.particles[:, 1] = self.robot_start_pos[1]
+        # self.particles[:, 2] = 0.0
 
         self.trajectory = []
         self.danger_points = []
@@ -283,23 +305,36 @@ class SimNode(Node):
 
             p.resetBasePositionAndOrientation(cid, new_pos, orn)
     
-    def mcl_motion_update(self, v, w):
-        dt = self.timeStep
-        noise = np.random.randn(self.num_particles, 3) * self.motion_noise
-
-        self.particles[:, 0] += v * np.cos(self.particles[:, 2]) * dt + noise[:, 0]
-        self.particles[:, 1] += v * np.sin(self.particles[:, 2]) * dt + noise[:, 1]
-        self.particles[:, 2] += w * dt + noise[:, 2]
+    def mcl_motion_update(self, v, omega, dt):
+        for p in self.particles:
+            # Reduced noise to avoid runaway drift
+            v_hat = v + np.random.normal(0, 0.005)
+            omega_hat = omega + np.random.normal(0, 0.002)
+    
+            p['x'] += v_hat * math.cos(p['yaw']) * dt
+            p['y'] += v_hat * math.sin(p['yaw']) * dt
+            p['yaw'] += omega_hat * dt
+    
+            # Enforce lane boundary after motion
+            p['y'] = float(np.clip(
+                p['y'],
+                -self.lane_width + (self.offset * 2),
+                self.lane_width - (self.offset * 2)
+            ))
 
             
     def cmd_callback(self, msg):
         """Handle velocity commands"""
         linear = msg.linear.x
         angular = msg.angular.z
-        
+    
+        # Store control for MCL (used in get_state)
+        self.last_v = linear
+        self.last_omega = angular
+    
         left = linear - angular * self.WHEEL_DISTANCE / 2
         right = linear + angular * self.WHEEL_DISTANCE / 2
-        
+    
         for i, j in enumerate(self.wheel_joints):
             vel = left if i % 2 == 0 else right
             p.setJointMotorControl2(
@@ -309,7 +344,6 @@ class SimNode(Node):
                 targetVelocity=vel,
                 force=self.MAX_FORCE
             )
-        self.mcl_motion_update(linear, angular)
 
     def shutdown_simulation(self):
         self.get_logger().info("Stopping simulation cleanly")
@@ -341,21 +375,32 @@ class SimNode(Node):
 
     def mcl_lane_measurement_update(self, y_meas, yaw_meas):
         for i, ptl in enumerate(self.particles):
-            y_hat = ptl[1]
-            yaw_hat = ptl[2]
+            y_hat = ptl['y']
+            yaw_hat = ptl['yaw']
 
             err_y = y_meas - y_hat
             err_yaw = yaw_meas - yaw_hat
 
-            self.weights[i] = np.exp(
+            weight = np.exp(
                 -0.5 * (
                     (err_y**2) / (self.lane_y_sigma**2) +
                     (err_yaw**2) / (self.lane_yaw_sigma**2)
                 )
             )
+            ptl['w'] = weight
+            self.weights[i] = weight
 
-        self.weights += 1e-9
-        self.weights /= np.sum(self.weights)
+        # Normalize weights
+        total_weight = sum(p['w'] for p in self.particles)
+        if total_weight > 0:
+            for p in self.particles:
+                p['w'] /= total_weight
+            self.weights = np.array([p['w'] for p in self.particles])
+        else:
+            # Fallback to uniform if all weights are zero
+            for p in self.particles:
+                p['w'] = 1.0 / self.num_particles
+            self.weights = np.ones(self.num_particles) / self.num_particles
 
     # def mcl_measurement_update(self, b1, b2, b3, b4):
     #     z = np.array([b1, b2, b3, b4])
@@ -376,43 +421,191 @@ class SimNode(Node):
     #     self.weights /= np.sum(self.weights)
 
     def mcl_resample(self):
-        idx = np.random.choice(
+        weights = [p['w'] for p in self.particles]
+        # Avoid numerical issues: ensure weights sum to 1
+        wsum = sum(weights)
+        if wsum <= 0:
+            weights = [1.0 / self.num_particles] * self.num_particles
+        else:
+            weights = [w / wsum for w in weights]
+    
+        indices = np.random.choice(
+            range(self.num_particles),
             self.num_particles,
-            size=self.num_particles,
-            p=self.weights
+            p=weights
         )
-        self.particles = self.particles[idx]
-        self.weights.fill(1.0 / self.num_particles)
+    
+        new_particles = []
+        for i in indices:
+            p = self.particles[i]
+            # Add small jitter to maintain diversity
+            x = p['x'] + np.random.normal(0, 0.01)
+            y = p['y'] + np.random.normal(0, 0.005)
+            yaw = p['yaw'] + np.random.normal(0, 0.005)
+    
+            # Clip to lane
+            y = float(np.clip(
+                y,
+                -self.lane_width + (self.offset * 2),
+                self.lane_width - (self.offset * 2)
+            ))
+    
+            new_particles.append({
+                'x': x,
+                'y': y,
+                'yaw': yaw,
+                'w': 1.0 / self.num_particles
+            })
+    
+        self.particles = new_particles
+        self.weights = np.ones(self.num_particles) / self.num_particles
+
+    def mcl_sensor_update(self, observed_ranges):
+        sigma = 0.3
+    
+        for p in self.particles:
+            expected = self.simulate_rays(p['x'], p['y'], p['yaw'])
+    
+            error = np.linalg.norm(
+                np.array(expected) - np.array(observed_ranges)
+            )
+    
+            # Gaussian likelihood
+            p['w'] = math.exp(-(error ** 2) / (2 * sigma ** 2))
+    
+        self.normalize_weights()
+    def normalize_weights(self):
+        total = sum(p['w'] for p in self.particles)
+        if total == 0:
+            for p in self.particles:
+                p['w'] = 1.0 / self.num_particles
+            return
+    
+        for p in self.particles:
+            p['w'] /= total
+    
+    def effective_sample_size(self):
+        return 1.0 / sum(p['w'] ** 2 for p in self.particles)
+ 
 
     def mcl_estimated_pose(self):
-        mean = np.average(self.particles, axis=0, weights=self.weights)
-        return mean  # x, y, yaw
+        x = sum(p['x'] * p['w'] for p in self.particles)
+        y = sum(p['y'] * p['w'] for p in self.particles)
+    
+        sin_yaw = sum(math.sin(p['yaw']) * p['w'] for p in self.particles)
+        cos_yaw = sum(math.cos(p['yaw']) * p['w'] for p in self.particles)
+    
+        yaw = math.atan2(sin_yaw, cos_yaw)
+        return x, y, yaw
+    
+    # def mcl_resample(self):
+    #     idx = np.random.choice(
+    #         self.num_particles,
+    #         size=self.num_particles,
+    #         p=self.weights
+    #     )
+    #     self.particles = self.particles[idx]
+    #     self.weights.fill(1.0 / self.num_particles)
 
     def neff(self):
-        return 1.0 / np.sum(self.weights ** 2)
+        return 1.0 / sum(p['w'] ** 2 for p in self.particles)
     
+    # def visualize_particles(self):
+    #     """Draw particles on the road for debugging MCL convergence"""
+    #     # Clear previous debug lines
+    #     if not hasattr(self, 'particle_debug_ids'):
+    #         self.particle_debug_ids = []
+    #     else:
+    #         for line_id in self.particle_debug_ids:
+    #             try:
+    #                 p.removeUserDebugItem(line_id)
+    #             except:
+    #                 pass
+    #         self.particle_debug_ids = []
+        
+    #     # Draw each particle as a small sphere
+    #     for particle in self.particles:
+    #         # Color based on weight (brighter = higher weight)
+    #         weight = particle['w']
+    #         r = min(1.0, weight * 10)  # Scale weight for visibility
+    #         g = 0.5
+    #         b = min(1.0, weight * 5)
+            
+    #         # Draw particle position as a colored sphere
+    #         line_id = p.addUserDebugLine(
+    #             lineFromXYZ=[particle['x'], particle['y'], 0.02],
+    #             lineToXYZ=[particle['x'], particle['y'], 0.02],
+    #             lineColorRGB=[r, g, b],
+    #             lineWidth=10,
+    #             lifeTime=0  # Persistent until removed
+    #         )
+    #         self.particle_debug_ids.append(line_id)
+        
+    #     # # Draw estimated pose (weighted average) in red
+    #     # x_hat, y_hat, yaw_hat = self.mcl_estimated_pose()
+    #     # est_line = p.addUserDebugLine(
+    #     #     lineFromXYZ=[x_hat, y_hat, 0.05],
+    #     #     lineToXYZ=[x_hat + 0.3 * math.cos(yaw_hat), y_hat + 0.3 * math.sin(yaw_hat), 0.05],
+    #     #     lineColorRGB=[1, 0, 0],  # Red for estimate
+    #     #     lineWidth=4,
+    #     #     lifeTime=0
+    #     # )
+    #     # self.particle_debug_ids.append(est_line)
+        
+    #     # # Draw ground truth robot pose in green
+    #     # robot_pos, robot_orn = p.getBasePositionAndOrientation(self.robot_id)
+    #     # gt_yaw = p.getEulerFromQuaternion(robot_orn)[2]
+    #     # gt_line = p.addUserDebugLine(
+    #     #     lineFromXYZ=[robot_pos[0], robot_pos[1], 0.05],
+    #     #     lineToXYZ=[robot_pos[0] + 0.3 * math.cos(gt_yaw), robot_pos[1] + 0.3 * math.sin(gt_yaw), 0.05],
+    #     #     lineColorRGB=[0, 1, 0],  # Green for ground truth
+    #     #     lineWidth=4,
+    #     #     lifeTime=0
+    #     # )
+    #     # self.particle_debug_ids.append(gt_line)
+
+
     def get_state(self):
         """
         Comprehensive State Construction:
         Indices: 0-3 (Beams), 4 (Dist), 5-6 (Lanes), 7 (SLAM Offset), 8 (Heading), 9 (D* Error)
         """
         try:
-            # --- A. POSE ESTIMATION (MCL) ---
-            robot_pos, robot_orn = p.getBasePositionAndOrientation(self.robot_id)
-            yaw = p.getEulerFromQuaternion(robot_orn)[2]
-            
-            # Perform MCL Particle Update
-            self.mcl_lane_measurement_update(robot_pos[1], yaw)
-            # if self.neff() < self.num_particles / 2:
-            #     self.mcl_resample()
-            
-            # Force ground-truth alignment during the first 5 steps to stabilize initialization
-            if self.dstar_step_counter < 5:
-                self.particles[:, 1] = robot_pos[1]  # Align Y to ground truth
-                self.particles[:, 2] = yaw           # Align Yaw to ground truth
-                x_hat, y_hat, yaw_hat = robot_pos[0], robot_pos[1], yaw
-            else:   
+            # --- A. GROUND TRUTH (SIM ONLY, NOT BELIEF) ---
+            robot_pos, gt_orn = p.getBasePositionAndOrientation(self.robot_id)
+            gt_yaw = p.getEulerFromQuaternion(gt_orn)[2]
+
+            # --- B. MCL: PREDICTION STEP ---
+            # Use last applied control
+            self.mcl_motion_update(
+                self.last_v,
+                self.last_omega,
+                self.timeStep
+            )
+
+            # --- C. MCL: MEASUREMENT UPDATE ---
+            # Lane-based measurement
+            self.mcl_lane_measurement_update(robot_pos[1], gt_yaw)
+
+            # --- D. MCL: RESAMPLING ---
+            if self.neff() < self.num_particles / 2:
+                self.mcl_resample()
+
+            # --- E. MCL: POSE ESTIMATE ---
+            if self.dstar_step_counter < 0:
+                # Bootstrap using ground truth (simulation convenience)
+                for pt in self.particles:
+                    pt['x'] = robot_pos[0]
+                    pt['y'] = robot_pos[1]
+                    pt['yaw'] = gt_yaw
+                    pt['w'] = 1.0 / self.num_particles
+                # Keep the separate weights array in sync
+                # self.weights = np.ones(self.num_particles) / self.num_particles
+                x_hat, y_hat, yaw_hat = robot_pos[0], robot_pos[1], gt_yaw
+                # print("Robot Pos used for : ", robot_pos)
+            else:
                 x_hat, y_hat, yaw_hat = self.mcl_estimated_pose()
+                # print("mcl_estimated_pose y estimated", y_hat, "y ground truth", robot_pos[1])
 
             # --- B. FEATURE MAPPING (SLAM) ---
             # Get local estimates from the SLAM history
@@ -427,6 +620,7 @@ class SimNode(Node):
 
             half_width = self.lane_width / 2.0
             lane_offset = (y_hat - lane_center) / half_width
+            lane_offset = float(np.clip(lane_offset, -1.0, 1.0))
 
             if left_flag > 0 or right_flag > 0:
                 self.feature_slam.update((x_hat, y_hat, yaw_hat), left_flag, right_flag)
@@ -894,78 +1088,80 @@ class SimNode(Node):
                 self.system_ready = True
                 self.get_logger().info("System ready! Starting simulation")
         
-        try:
-            p.stepSimulation()
-            self.move_cars()
-            
-            # Check for collision and lane exit
-            collision = self.check_collision()
-            lane_exit = self.check_lane_exit()
-            done = collision or lane_exit
-            
-            # Publish done status
-            done_msg = Float32MultiArray()
-            done_msg.data = [float(collision), float(lane_exit), float(done)]
-            self.done_pub.publish(done_msg)
-            
-            # Publish current state
-            state = self.get_state()
-            msg = Float32MultiArray()
-            msg.data = state.tolist()
-            self.step_pub.publish(msg)
-            
-            # Publish SLAM lane features periodically
-            if self.dstar_step_counter % 5 == 0:
-                slam_map = self.feature_slam.get_map()
-                if slam_map:
-                    slam_msg = Float32MultiArray()
-                    # Publish observations with position context: [x1, left_y1, right_y1, robot_y1, x2, ...]
-                    slam_msg.data = [float(obs['x_pos']) for obs in slam_map for obs in [obs]] + \
-                                    [float(obs['left_y']) for obs in slam_map] + \
-                                    [float(obs['right_y']) for obs in slam_map] + \
-                                    [float(obs['robot_y']) for obs in slam_map]
-                    self.slam_map_pub.publish(slam_msg)
-            
-            # Publish D* path planning info periodically
-            if self.dstar_step_counter % 10 == 0:
-                robot_pos, _ = p.getBasePositionAndOrientation(self.robot_id)
-                x_hat, y_hat, yaw_hat = self.mcl_estimated_pose()
-                robot_cell = (
-                    np.clip(int((x_hat + 10) / 0.5), 0, self.dstar.width - 1),
-                    np.clip(int((y_hat + self.lane_width) / 0.5), 0, self.dstar.height - 1)
-                )
-                try:
-                    path = self.dstar.plan(robot_cell)
-                    # Publish goal position
-                    goal = self.dstar.goal
-                    path_msg = Float32MultiArray()
-                    path_msg.data = [
-                        float(robot_cell[0]),
-                        float(robot_cell[1]),
-                        float(goal[0]),
-                        float(goal[1]),
-                        float(len(self.dstar.obstacles))  # obstacle count
-                    ]
-                    self.path_pub.publish(path_msg)
-                except Exception as e:
-                    self.get_logger().debug(f"Path planning publish error: {e}")
-            
-            self.dstar_step_counter += 1
-            
-            # Update camera to follow robot
+        # try:
+        p.stepSimulation()
+        self.move_cars()
+        
+        # Check for collision and lane exit
+        collision = self.check_collision()
+        lane_exit = self.check_lane_exit()
+        done = collision or lane_exit
+        
+        # Publish done status
+        done_msg = Float32MultiArray()
+        done_msg.data = [float(collision), float(lane_exit), float(done)]
+        self.done_pub.publish(done_msg)
+        
+        # Publish current state
+        state = self.get_state()
+        msg = Float32MultiArray()
+        msg.data = state.tolist()
+        self.step_pub.publish(msg)
+        
+        # Publish SLAM lane features periodically
+        if self.dstar_step_counter % 5 == 0:
+            slam_map = self.feature_slam.get_map()
+            if slam_map:
+                slam_msg = Float32MultiArray()
+                # Publish observations with position context: [x1, left_y1, right_y1, robot_y1, x2, ...]
+                slam_msg.data = [float(obs['x_pos']) for obs in slam_map for obs in [obs]] + \
+                                [float(obs['left_y']) for obs in slam_map] + \
+                                [float(obs['right_y']) for obs in slam_map] + \
+                                [float(obs['robot_y']) for obs in slam_map]
+                self.slam_map_pub.publish(slam_msg)
+        
+        # Publish D* path planning info periodically
+        if self.dstar_step_counter % 10 == 0:
+            robot_pos, _ = p.getBasePositionAndOrientation(self.robot_id)
+            x_hat, y_hat, yaw_hat = self.mcl_estimated_pose()
+            robot_cell = (
+                np.clip(int((x_hat + 10) / 0.5), 0, self.dstar.width - 1),
+                np.clip(int((y_hat + self.lane_width) / 0.5), 0, self.dstar.height - 1)
+            )
             try:
-                pos, _ = p.getBasePositionAndOrientation(self.robot_id)
-                p.resetDebugVisualizerCamera(
-                    cameraDistance=5,
-                    cameraYaw=0,
-                    cameraPitch=-80,
-                    cameraTargetPosition=pos
-                )
+                path = self.dstar.plan(robot_cell)
+                # Publish goal position
+                goal = self.dstar.goal
+                path_msg = Float32MultiArray()
+                path_msg.data = [
+                    float(robot_cell[0]),
+                    float(robot_cell[1]),
+                    float(goal[0]),
+                    float(goal[1]),
+                    float(len(self.dstar.obstacles))  # obstacle count
+                ]
+                self.path_pub.publish(path_msg)
             except Exception as e:
-                self.get_logger().debug(f"Camera update error: {e}")
-                
+                self.get_logger().debug(f"Path planning publish error: {e}")
+        
+        self.dstar_step_counter += 1
+        
+        # Update camera to follow robot
+        try:
+            # Visualize particles for debugging
+            # self.visualize_particles()
+            pos, _ = p.getBasePositionAndOrientation(self.robot_id)
+            p.resetDebugVisualizerCamera(
+                cameraDistance=5,
+                cameraYaw=0,
+                cameraPitch=-80,
+                cameraTargetPosition=pos
+            )
         except Exception as e:
-            self.get_logger().error(f"Simulation step error: {e}")
+            self.get_logger().debug(f"Camera update error: {e}")
+                
+        # except Exception as e:
+        #     self.get_logger().error(f"Simulation step error: {e}")
 
 
 def main():

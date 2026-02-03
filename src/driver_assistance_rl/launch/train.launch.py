@@ -46,7 +46,8 @@ def generate_launch_description():
             executable='rl_agent_node',
             name='rl_agent_node',
             output='screen',
-            emulate_tty=True
+            emulate_tty=True,
+            parameters=[{'mode': 'training'}]
         ),
 
         # Training coordinator node

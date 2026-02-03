@@ -16,12 +16,24 @@ class RLAgentNode(Node):
     3. Publishes action command to control node
     """
     
-    def __init__(self, mode='inference', model_path=None):
+    def __init__(self, model_path=None):
         super().__init__('rl_agent_node')
         
         # Mode can be 'inference' or 'training'
-        self.mode = mode
         self.model_path = model_path or "./ppo_driver_model.pth"
+
+        self.declare_parameter('mode', 'inference')
+ 
+        # Get parameter value
+        self.mode = self.get_parameter('mode').value
+ 
+        self.done =False
+        self.get_logger().info(f"RL Agent running in {self.mode} mode")
+ 
+        if self.mode == 'training':
+            self.training = True
+        else:
+            self. Training = False
         
         # Initialize PPO agent
         self.agent = PPOAgent(
@@ -43,14 +55,21 @@ class RLAgentNode(Node):
             self.state_callback,
             10
         )
-        
+
+        self.done_sub = self.create_subscription(
+            Float32MultiArray, '/sim/done', self.done_callback, 10
+        )
         # Publisher for commands
         self.cmd_pub = self.create_publisher(
             Twist,
             '/cmd_vel',
             10
         )
-        
+        self.reset_pub = self.create_publisher(
+            Float32MultiArray,
+            '/sim/reset_inference',
+            10
+        )
         # Publisher for diagnostics (action info)
         self.action_pub = self.create_publisher(
             Float32MultiArray,
@@ -114,7 +133,7 @@ class RLAgentNode(Node):
             10
         )
         
-        self.get_logger().info(f"RLAgentNode initialized in {mode} mode")
+        self.get_logger().info(f"RLAgentNode initialized in {self.mode} mode")
         
     def reset_callback(self, msg):
         """Handle reset requests to reinitialize action publishing"""
@@ -152,6 +171,8 @@ class RLAgentNode(Node):
             done
         )
         self.get_logger().debug(f"Transition stored: reward={reward:.2f}, done={done}")
+
+        
     
     def train_trigger_callback(self, msg):
         """Receive training trigger and perform gradient updates"""
@@ -275,18 +296,37 @@ class RLAgentNode(Node):
         self.agent.load_model(path)
         self.get_logger().info(f"Model loaded from {path}")
 
+    def done_callback(self, msg):
+        """Receive collision/lane exit status from simulation"""
+        collision = bool(msg.data[0])
+        lane_exit = bool(msg.data[1])
+        if collision:
+            self.get_logger().warn("Collision detected!")
+        if lane_exit:
+            self.get_logger().warn("Lane exit detected!")
+        if self.mode == 'inference':
+            print("Shutting down due to done signal in inference mode.")
+            self.done = collision or lane_exit
+            if self.done:
+                if hasattr(self, 'timer'):
+                        self.timer.cancel() # Stop any ongoing timers
+                stop_msg = Float32MultiArray()
+                stop_msg.data = [0.0]  # 0.0 means “do not reset anymore / stop”
+                self.reset_pub.publish(stop_msg)
+            
 
 def main():
     rclpy.init()
     
     # Default to inference mode
-    mode = 'inference'
-    # Uncomment for training:
-    mode = 'training'
+    # mode = 'inference'
+    # # Uncomment for training:
+    # mode = 'training'
     
-    node = RLAgentNode(mode=mode)
+    node = RLAgentNode()
     try:
-        rclpy.spin(node)
+        while node.done is False:
+            rclpy.spin_once(node, timeout_sec=0.1)
     except KeyboardInterrupt:
         pass
     finally:
