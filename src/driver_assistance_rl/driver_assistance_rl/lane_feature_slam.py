@@ -5,9 +5,7 @@ class LaneFeatureSLAM:
         self.position_threshold = 0.5  # Only store when robot moved >0.5 units
 
     def update(self, robot_pose, left_y, right_y):
-        """
-        Store lane observations only when robot position changes significantly
-        """
+
         x, y, yaw = robot_pose
 
         # Only add observation if robot moved far enough from last stored position
@@ -22,11 +20,9 @@ class LaneFeatureSLAM:
             self.last_stored_x = x
 
     def get_map(self):
-        """Returns all observations with position context"""
         return self.observations
 
     def get_estimated_lanes(self):
-        """Returns global lane estimates by averaging observations"""
         if not self.observations:
             return None, None
         est_left = sum(obs['left_y'] for obs in self.observations) / len(self.observations)

@@ -9,12 +9,6 @@ import time
 from driver_assistance_rl.ppo_agent import PPOAgent
 
 class RLAgentNode(Node):
-    """
-    RL Agent node that:
-    1. Receives state from sensor node
-    2. Computes action using PPO agent
-    3. Publishes action command to control node
-    """
     
     def __init__(self, model_path=None):
         super().__init__('rl_agent_node')
@@ -70,7 +64,7 @@ class RLAgentNode(Node):
             '/sim/reset_inference',
             10
         )
-        # Publisher for diagnostics (action info)
+        # Publisher for diagnostics, action information 
         self.action_pub = self.create_publisher(
             Float32MultiArray,
             '/rl/action',
@@ -84,7 +78,7 @@ class RLAgentNode(Node):
         
         # System synchronization
         self.system_ready = False
-        self.startup_delay = 5.5  # seconds to wait (0.5 second after sim_node)
+        self.startup_delay = 5.5  # seconds to wait, 0.5 second after sim_node
         self.startup_time = time.time()
         self.first_episode = True
         
@@ -136,8 +130,6 @@ class RLAgentNode(Node):
         self.get_logger().info(f"RLAgentNode initialized in {self.mode} mode")
         
     def reset_callback(self, msg):
-        """Handle reset requests to reinitialize action publishing"""
-        # self.get_logger().info("Reset signal received in rl_agent_node - keeping model intact")
         if msg.data[0] == 0.0:
             # Training finished, stop reacting
             self.get_logger().info("Received stop signal. No further resets.")
@@ -155,7 +147,6 @@ class RLAgentNode(Node):
         
     
     def transition_callback(self, msg):
-        """Receive reward and done flag, store transition in agent memory"""
         if self.mode != 'training' or self.last_state is None:
             return
         
@@ -175,7 +166,6 @@ class RLAgentNode(Node):
         
     
     def train_trigger_callback(self, msg):
-        """Receive training trigger and perform gradient updates"""
         if self.mode != 'training':
             return
         
@@ -192,10 +182,6 @@ class RLAgentNode(Node):
             print("\n" + "="*60)
         
     def state_callback(self, msg):
-        """
-        Receive state and compute action.
-        State format: [b1, b2, b3, b4, beam_dist, left_lane, right_lane, lane_offset, heading_error]
-        """
         # Handle post-episode reset synchronization
         if self.awaiting_post_episode_reset:
             elapsed = time.time() - self.post_episode_reset_time
@@ -251,10 +237,6 @@ class RLAgentNode(Node):
             self.last_logprob = logprob
                 
     def remember_transition(self, reward, done):
-        """
-        Store transition in agent memory for training.
-        Called from training node after reward computation.
-        """
         if self.mode == 'training' and self.last_state is not None:
             self.agent.remember(
                 self.last_state,
@@ -265,7 +247,6 @@ class RLAgentNode(Node):
             )
     
     def path_callback(self, msg):
-        """Receive D* path planning information for diagnostics"""
         if len(msg.data) >= 5:
             robot_x, robot_y, goal_x, goal_y, obstacle_count = msg.data[:5]
             self.get_logger().debug(
@@ -274,30 +255,25 @@ class RLAgentNode(Node):
             )
     
     def slam_callback(self, msg):
-        """Receive SLAM lane features for diagnostics"""
         if len(msg.data) >= 3:
             # SLAM publishes lane features as [a1, b1, c1, a2, b2, c2, ...]
             num_features = len(msg.data) // 3
             self.get_logger().debug(f"SLAM detected {num_features} lane features")
     
     def train(self, force=False, entropy_coef=None):
-        """Train the agent"""
         if self.mode != 'training':
             return None
         return self.agent.train(force=force, entropy_coef=entropy_coef)
     
     def save_model(self, path):
-        """Save the model"""
         self.agent.save_model(path)
         self.get_logger().info(f"Model saved to {path}")
     
     def load_model(self, path):
-        """Load the model"""
         self.agent.load_model(path)
         self.get_logger().info(f"Model loaded from {path}")
 
     def done_callback(self, msg):
-        """Receive collision/lane exit status from simulation"""
         collision = bool(msg.data[0])
         lane_exit = bool(msg.data[1])
         if collision:
@@ -305,9 +281,9 @@ class RLAgentNode(Node):
         if lane_exit:
             self.get_logger().warn("Lane exit detected!")
         if self.mode == 'inference':
-            print("Shutting down due to done signal in inference mode.")
             self.done = collision or lane_exit
             if self.done:
+                print("Shutting down due to done signal in inference mode.")
                 if hasattr(self, 'timer'):
                         self.timer.cancel() # Stop any ongoing timers
                 stop_msg = Float32MultiArray()
@@ -317,11 +293,6 @@ class RLAgentNode(Node):
 
 def main():
     rclpy.init()
-    
-    # Default to inference mode
-    # mode = 'inference'
-    # # Uncomment for training:
-    # mode = 'training'
     
     node = RLAgentNode()
     try:

@@ -20,7 +20,7 @@ setup(
     install_requires=['setuptools', 'torch', 'pybullet', 'numpy'],
     zip_safe=True,
     maintainer='Driver Assistance Team',
-    maintainer_email='team@example.com',
+    maintainer_email='',
     description='Driver assistance RL using ROS 2 and PyBullet - Adapted from DriverAssistanceSim',
     license='Apache-2.0',
     tests_require=['pytest'],

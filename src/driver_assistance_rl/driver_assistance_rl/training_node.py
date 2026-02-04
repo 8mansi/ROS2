@@ -63,9 +63,6 @@ class TrainingNode(Node):
             Float32MultiArray, '/rl/state', self.state_callback, 10
         )
 
-        # self.step_sub = self.create_subscription(
-        #     Float32MultiArray, '/sim/step', self.training_step_callback, 10
-        # )
         
         self.action_sub = self.create_subscription(
             Float32MultiArray, '/rl/action', self.action_callback, 10
@@ -86,9 +83,7 @@ class TrainingNode(Node):
             Float32MultiArray, '/training/transition', 10
         )
     
-        
-        # Timer for episode management
-        # self.step_timer = self.create_timer(self.timeStep, self.training_step_callback)
+
         
         # Storage for current transition
         self.current_state = None
@@ -100,7 +95,7 @@ class TrainingNode(Node):
         
         # System synchronization
         self.system_ready = False
-        self.startup_delay = 6  # seconds to wait (1 second after sim_node)
+        self.startup_delay = 6  # seconds to wait, 1 second after sim_node
         self.startup_time = time.time()
         self.first_state_received = False
         self.first_action_received = False
@@ -108,31 +103,21 @@ class TrainingNode(Node):
         # Post-episode synchronization
         self.awaiting_post_episode_sync = False
         self.post_episode_sync_time = None
-        self.post_episode_sync_delay = 3.0  # seconds to wait between episodes (1s longer than sim node reset delay)
+        self.post_episode_sync_delay = 3.0  # seconds to wait between episodes, 1s longer than sim node reset delay
         
         self.get_logger().info("TrainingNode initialized")
         
     def state_callback(self, msg):
-        """Receive state from sensor"""
-        # # Skip state updates during post-episode sync to allow reset to complete
-        # if self.awaiting_post_episode_sync:
-        #     print("training node - ",self.awaiting_post_episode_sync)
-        #     return
         self.current_state = np.array(msg.data, dtype=np.float32)
         self.first_state_received = True
         self.training_step_callback()
         
     def action_callback(self, msg):
-        """Receive action from agent"""
-        # # Skip action updates during post-episode sync to allow reset to complete
-        # if self.awaiting_post_episode_sync:
-        #     return
         self.current_action = int(msg.data[0])
         self.current_logprob = float(msg.data[1])
         self.first_action_received = True
         
     def done_callback(self, msg):
-        """Receive collision/lane exit status from simulation"""
         collision = bool(msg.data[0])
         lane_exit = bool(msg.data[1])
         self.done = bool(msg.data[2])
@@ -142,31 +127,9 @@ class TrainingNode(Node):
         if lane_exit:
             self.get_logger().warn("Lane exit detected!")
 
-    # def compute_reward(self, state, action, done):
-    #     # state[9] is D* error
-    #     # state[7] is Lane Offset
-        
-    #     # Penalize the SQUARE of the errors to punish large deviations heavily
-    #     dstar_penalty = 4.0 * (state[9]**2)
-    #     offset_penalty = 2.0 * (state[7]**2)
-        
-    #     reward = 2.0 - dstar_penalty - offset_penalty
-
-    #     # If camera lost lane (based on your log triggering 0.0 mean)
-    #     if abs(state[7]) >= 1.0:
-    #         print("Lane lost penalty applied - ",state[7])
-    #         reward -= 10.0
-            
-    #     if done:
-    #         reward -= 50.0 # Heavy crash penalty
-    #     print("compute reward - state :",state)
-    #     return reward
 
     def compute_reward(self, state, action, done):
-        """
-        Compute reward based on state and action.
-        Adapted from DriverAssistanceSim.compute_reward()
-        """
+      
         reward = 0
         b1, b2, b3, b4 = state[0], state[1], state[2], state[3]
         beam_dist = state[4]
@@ -177,7 +140,6 @@ class TrainingNode(Node):
         
         # Obstacle avoidance
         max_beam = max(b1, b2, b3, b4)
-        # reward += (1 - max_beam) * 3
         
         if max_beam > 0.85:
             reward -= 12
@@ -220,7 +182,6 @@ class TrainingNode(Node):
         return reward
     
     def get_action_str(self, action):
-        """Convert action index to string"""
         action_map = {
             0: "STRAIGHT",
             1: "LEFT",
@@ -230,7 +191,6 @@ class TrainingNode(Node):
         return action_map.get(action, "UNKNOWN")
         
     def training_step_callback(self):
-        """Main training loop step"""
         # Handle post-episode synchronization
         if self.awaiting_post_episode_sync:
             elapsed = time.time() - self.post_episode_sync_time
@@ -243,7 +203,7 @@ class TrainingNode(Node):
                 self.get_logger().info(f"Episode {self.current_episode} - System re-synchronized! Starting new episode...")
                 return
         
-        # Check if system is ready (initial startup)
+        # Check if system is ready 
         if not self.system_ready:
             elapsed = time.time() - self.startup_time
             if elapsed < self.startup_delay:
@@ -284,10 +244,8 @@ class TrainingNode(Node):
             self.end_episode()
         
     def end_episode(self):
-        """End current episode and prepare for next"""        
-       
         
-        self.training_active = False  # Pause training
+        self.training_active = False 
         self.awaiting_post_episode_sync = True
         self.post_episode_sync_time = time.time()
         
@@ -313,11 +271,11 @@ class TrainingNode(Node):
         # Reset for next episode
         self.step_count = 0
         self.episode_reward = 0
-        self.done = False  # Reset done flag for new episode
-        self.current_state = None  # Clear state to prevent stale processing
-        self.current_action = None  # Clear action
-        self.first_state_received = False  # Reset state reception flag for new episode
-        self.first_action_received = False  # Reset action reception flag for new episode
+        self.done = False 
+        self.current_state = None  
+        self.current_action = None 
+        self.first_state_received = False 
+        self.first_action_received = False  
 
          # Check if training is complete
         if self.current_episode > self.EPISODES:
@@ -347,7 +305,7 @@ class TrainingNode(Node):
         self.reset_pub.publish(reset_msg)
         self.get_logger().info(f"Reset signal sent to all nodes")
         
-        # Trigger training update on RL agent (force training at end of episode)
+        # Trigger training update on RL agent ,force training at end of episode
         train_msg = Float32MultiArray()
         train_msg.data = [1.0]  # force=True
         self.train_trigger_pub.publish(train_msg)

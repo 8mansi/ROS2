@@ -92,7 +92,7 @@ class PPOAgent:
         lane_offset = state[7]  # lane offset from center
         dstar_heading = state[9]  # D* suggested heading
 
-        # Safety constraints: remove unsafe actions
+        #  remove unsafe actions
         if front_dist > 1 - 0.35 and 0 in safe_actions:
             safe_actions.remove(0)
         if left_dist > 1 - 0.25 and 1 in safe_actions:
@@ -106,11 +106,7 @@ class PPOAgent:
         mask[safe_actions] = 1.0
         masked_logits = logits + (mask + 1e-8).log()  # avoid log(0)
 
-        # Apply D* guidance: boost actions that align with planned path
-        # Action 0: straight (when dstar_heading near 0)
-        # Action 1: left turn (when dstar_heading > 0.3)
-        # Action 2: right turn (when dstar_heading < -0.3)
-        # Action 3: slow down
+     
         dstar_boost = 0.2
         if dstar_heading > 0.3:
             masked_logits[1] += dstar_boost  # Boost left turn

@@ -7,9 +7,6 @@ import numpy as np
 import time
 
 class SensorNode(Node):
-    """
-    Sensor node that receives state from simulation and publishes it for the RL agent.
-    """
     
     def __init__(self):
         super().__init__('sensor_node')
@@ -41,7 +38,6 @@ class SensorNode(Node):
         self.get_logger().info("SensorNode initialized")
     
     def reset_callback(self, msg):
-        """Handle reset requests to reinitialize state publishing"""
         self.get_logger().info("Reset signal received in sensor_node")
         if msg.data[0] == 0.0:
             # Training finished, stop reacting
@@ -54,13 +50,6 @@ class SensorNode(Node):
         self.system_ready = False  # Pause publishing until sync complete
         
     def state_callback(self, msg):
-        """
-        Receive state from simulation and republish for RL agent.
-        This node acts as a passthrough that could be extended for:
-        - Additional sensor processing
-        - Noise injection
-        - State filtering
-        """
         # Handle post-episode reset synchronization
         if self.awaiting_post_episode_reset:
             elapsed = time.time() - self.post_episode_reset_time
@@ -81,7 +70,7 @@ class SensorNode(Node):
                 self.system_ready = True
                 self.get_logger().info("Sensor node ready!")
         
-        # State directly from simulation: [b1, b2, b3, b4, beam_dist, left_lane, right_lane, lane_offset, heading_error]
+        # State  [b1, b2, b3, b4, beam_dist, left_lane, right_lane, lane_offset, heading_error]
         state = np.array(msg.data, dtype=np.float32)
         
         # Publish state for RL agent
